@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/storage"
@@ -33,6 +35,10 @@ const (
 type SubmitHandler struct {
 	Sessions *auth.SessionSigner
 	Store    storage.Store
+
+	// Log records successful submissions for the admin dashboard.
+	// Optional — a nil Log disables recording.
+	Log Log
 
 	// ArchiveOptions bounds ValidateArchive's per-entry reads. Zero
 	// value uses submission's own defaults.
@@ -136,6 +142,22 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := h.Store.Save(r.Context(), header.Filename, file, header.Size); err != nil {
 		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to store archive"})
 		return
+	}
+
+	if h.Log != nil {
+		entry := Entry{
+			Moniker:         moniker,
+			OperatorAddress: operatorAddr.String(),
+			Filename:        header.Filename,
+			SubmittedAt:     time.Now().UTC(),
+		}
+		if err := h.Log.Record(r.Context(), entry); err != nil {
+			// The archive is already safely stored — a logging failure
+			// shouldn't fail the submission from the validator's point
+			// of view, but organizers should still be able to see it
+			// happened.
+			log.Printf("submission log: unable to record entry for %s: %v", header.Filename, err)
+		}
 	}
 
 	writeSubmitResult(w, http.StatusOK, submitResponse{

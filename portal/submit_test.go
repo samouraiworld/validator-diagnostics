@@ -49,6 +49,18 @@ func (s *fakeStore) get(key string) ([]byte, bool) {
 	return data, ok
 }
 
+type fakeLog struct {
+	mu      sync.Mutex
+	entries []Entry
+}
+
+func (l *fakeLog) Record(ctx context.Context, e Entry) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, e)
+	return nil
+}
+
 func buildValidArchive(t *testing.T, validatorAddress string) []byte {
 	t.Helper()
 
@@ -286,5 +298,74 @@ func TestSubmitHandler_RejectsMalformedArchive(t *testing.T) {
 	}
 	if len(store.saved) != 0 {
 		t.Error("archive should not have been stored")
+	}
+}
+
+func TestSubmitHandler_RecordsLogOnSuccess(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+	handler := &SubmitHandler{Sessions: sessions, Store: store, Log: submissionLog}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	filename := "samourai-20260709-1830UTC.tar.gz"
+	body, contentType := multipartUpload(t, filename, archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	if len(submissionLog.entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(submissionLog.entries))
+	}
+	got := submissionLog.entries[0]
+	if got.Moniker != "samourai" || got.OperatorAddress != operatorAddr.String() || got.Filename != filename {
+		t.Errorf("logged entry = %+v, unexpected content", got)
+	}
+}
+
+func TestSubmitHandler_DoesNotRecordLogOnFailure(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+	handler := &SubmitHandler{Sessions: sessions, Store: store, Log: submissionLog}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	// Bad filename -> ValidateFilename fails before Store.Save/Log.Record.
+	body, contentType := multipartUpload(t, "not-the-right-convention.tar.gz", archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	if len(submissionLog.entries) != 0 {
+		t.Errorf("expected no logged entries on failure, got %+v", submissionLog.entries)
 	}
 }
