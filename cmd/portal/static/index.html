@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Validator Fire Drill — Submit</title>
+<link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+<main>
+<h1>Validator Fire Drill — Submission</h1>
+
+<section id="step-address" class="step">
+  <h2>1. Operator address</h2>
+  <label for="operator-address">Your valopers operator address</label>
+  <input type="text" id="operator-address" placeholder="g1...">
+  <button id="get-challenge">Get challenge</button>
+  <p class="error" id="address-error"></p>
+</section>
+
+<section id="step-sign" class="step" hidden>
+  <h2>2. Sign the challenge</h2>
+  <p>Run this command locally, with your operator key:</p>
+  <pre id="sign-command"></pre>
+  <p><a id="download-challenge" download="challenge.json">Download challenge.json</a></p>
+  <label for="sig-file">Upload the resulting sig.json</label>
+  <input type="file" id="sig-file" accept=".json">
+  <button id="verify-signature">Verify</button>
+  <p class="error" id="sign-error"></p>
+</section>
+
+<section id="step-upload" class="step" hidden>
+  <h2>3. Upload archive</h2>
+  <p class="success">Authenticated as <span id="authenticated-address"></span></p>
+  <label for="archive-file">Diagnostic archive (&lt;moniker&gt;-&lt;YYYYMMDD-HHMMUTC&gt;.tar.gz)</label>
+  <input type="file" id="archive-file" accept=".gz,.tar.gz">
+  <button id="submit-archive">Submit</button>
+  <p class="error" id="upload-error"></p>
+</section>
+
+<section id="step-done" class="step" hidden>
+  <h2>Submission received</h2>
+  <p id="done-message"></p>
+</section>
+
+</main>
+<script src="/portal.js"></script>
+</body>
+</html>
