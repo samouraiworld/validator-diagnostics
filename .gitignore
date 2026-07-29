@@ -1,0 +1,9 @@
+# Scratch artifacts from manual testing (challenge/signature round-trips)
+challenge.json
+challenge_response.json
+sig.json
+
+# Local dev server output
+portal-uploads/
+portal-dev-uploads/
+submissions.jsonl
