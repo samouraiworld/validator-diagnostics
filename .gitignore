@@ -7,3 +7,6 @@ sig.json
 portal-uploads/
 portal-dev-uploads/
 submissions.jsonl
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
+/.superpowers/
