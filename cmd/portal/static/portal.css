@@ -120,3 +120,24 @@ th, td {
   padding: 0.5rem;
   text-align: left;
 }
+
+header.site-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+header.site-header .logo {
+  width: 92px;
+  height: auto;
+  color: var(--fg);
+  flex-shrink: 0;
+}
+
+header.site-header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--muted);
+}
