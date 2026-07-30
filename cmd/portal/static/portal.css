@@ -164,12 +164,27 @@ pre {
 table {
   width: 100%;
   border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
 }
 
 th, td {
-  border: 1px solid var(--border);
-  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 0.5rem;
   text-align: left;
+}
+
+th {
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+tbody tr:nth-child(even) {
+  background: var(--surface);
 }
 
 header.site-header {
