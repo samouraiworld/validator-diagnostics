@@ -8,5 +8,5 @@ RUN CGO_ENABLED=0 go build -o /out/portal ./cmd/portal
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/portal /usr/local/bin/portal
-EXPOSE 8080
+EXPOSE 8888
 ENTRYPOINT ["portal"]
