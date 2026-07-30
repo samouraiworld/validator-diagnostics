@@ -1,0 +1,9 @@
+.git
+docs
+portal-uploads
+portal-dev-uploads
+*.jsonl
+challenge.json
+challenge_response.json
+sig.json
+.superpowers
