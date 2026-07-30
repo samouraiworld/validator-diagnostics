@@ -73,6 +73,51 @@
 <section id="step-upload" class="step" hidden>
   <h2>Upload archive</h2>
   <p class="success">Authenticated as <span id="authenticated-address"></span></p>
+
+  <details class="archive-help">
+    <summary>What should the archive contain?</summary>
+    <p>Archive structure:</p>
+    <pre>&lt;moniker&gt;-&lt;YYYYMMDD-HHMMUTC&gt;.tar.gz
+├── gnoland.log.gz
+└── metadata.json</pre>
+    <ul>
+      <li><code>gnoland.log.gz</code> — the node logs covering the requested investigation window (must be a valid gzip file).</li>
+      <li><code>metadata.json</code> — validator and environment metadata; schema and example below. Unknown fields are rejected.</li>
+      <li>Exactly these two files at the top level of the archive — no subfolders, no symlinks, no extra files.</li>
+      <li><code>validator_address</code> must match your operator address; <code>moniker</code> must match the archive's filename.</li>
+      <li>Size limits: <code>gnoland.log.gz</code> ≤ 2 GiB, <code>metadata.json</code> ≤ 64 KiB, total upload ≤ 10 GiB.</li>
+    </ul>
+    <p>Example <code>metadata.json</code>:</p>
+    <pre>{
+  "validator_address": "...",
+  "moniker": "...",
+
+  "chain_id": "...",
+  "gnoland_version": "...",
+  "genesis_sha256": "...",
+
+  "operating_system": "Debian 12",
+  "architecture": "amd64",
+
+  "sentry_enabled": true,
+  "backup_node": true,
+
+  "hosting_provider": "Scaleway",
+  "deployment_method": "docker",
+
+  "recent_operations": "None"
+}</pre>
+    <table>
+      <thead><tr><th>Field</th><th>Allowed values</th></tr></thead>
+      <tbody>
+        <tr><td>architecture</td><td>amd64, arm64, x86</td></tr>
+        <tr><td>deployment_method</td><td>docker, systemd, binary, kubernetes</td></tr>
+        <tr><td>sentry_enabled</td><td>true, false</td></tr>
+        <tr><td>backup_node</td><td>true, false</td></tr>
+      </tbody>
+    </table>
+  </details>
+
   <label for="archive-file">Diagnostic archive (&lt;moniker&gt;-&lt;YYYYMMDD-HHMMUTC&gt;.tar.gz)</label>
   <input type="file" id="archive-file" accept=".gz,.tar.gz">
   <button id="submit-archive">Submit</button>
