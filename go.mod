@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.31
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.30
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.0
-	github.com/gnolang/gno v0.0.0-00010101000000-000000000000
+	github.com/gnolang/gno v0.0.0-20260720122938-d14a03770521
 )
 
 require (
@@ -82,5 +82,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/gnolang/gno => /home/louis/Documents/Samourai/gno
