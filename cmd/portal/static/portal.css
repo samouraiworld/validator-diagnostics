@@ -33,7 +33,7 @@
   --green-900: #144134;
 
   --red-400: #eb6c49;
-  --red-600: #c95c3e;
+  --red-600: #a8402a;
 
   --fg: var(--gray-800);
   --bg: #ffffff;
@@ -73,6 +73,11 @@ body {
   max-width: 640px;
   margin: 2rem auto;
   padding: 0 1rem;
+  line-height: 1.5;
+}
+
+h1, h2 {
+  line-height: 1.25;
 }
 
 main {
@@ -124,7 +129,8 @@ input[type="text"], input[type="file"] {
 }
 
 input[type="text"]:focus, input[type="file"]:focus {
-  outline: none;
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
   border-color: var(--brand);
 }
 
