@@ -22,6 +22,23 @@ Then open `http://localhost:8080/` for the validator submission flow, and
 `http://localhost:8080/admin` (HTTP Basic Auth — any username, password =
 `ADMIN_PASSWORD`) for the live submissions dashboard.
 
+### Docker (fastest way to start everything)
+
+No Go toolchain or real AWS credentials needed — `docker compose` starts
+the portal plus a local S3-compatible backend (MinIO) together:
+
+```bash
+cp .env.example .env   # fill in REMOTE and ADMIN_PASSWORD at minimum
+docker compose up --build
+```
+
+Same URLs as above (`http://localhost:8080/` and `http://localhost:8080/admin`).
+Everything — the RPC endpoint, admin password, storage credentials, and
+published port — is configured through `.env` (see
+[`.env.example`](.env.example) for the full list of variables and
+defaults). Uploaded archives and the submission log persist across
+`docker compose down` / `up` in named volumes.
+
 ### Flags and environment variables
 
 | Flag | Required | Description |
