@@ -10,3 +10,6 @@ submissions.jsonl
 
 # Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
 /.superpowers/
+
+# Local docker-compose configuration (contains ADMIN_PASSWORD, MinIO creds)
+.env
