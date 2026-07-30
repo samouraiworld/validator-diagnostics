@@ -16,20 +16,53 @@
 
 :root {
   color-scheme: light dark;
-  --fg: #1a1a1a;
-  --bg: #ffffff;
-  --border: #ccc;
-  --error: #b00020;
-  --success: #0a7d2c;
+
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif;
   --font-mono: "Roboto Mono", ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
+  --gray-50: #f0f0f0;
+  --gray-100: #e2e2e2;
+  --gray-400: #7c7c7c;
+  --gray-500: #696969;
+  --gray-700: #292929;
+  --gray-800: #141414;
+  --gray-850: #0e0e0e;
+
+  --green-400: #60ab96;
+  --green-600: #226c57;
+  --green-900: #144134;
+
+  --red-400: #eb6c49;
+  --red-600: #c95c3e;
+
+  --fg: var(--gray-800);
+  --bg: #ffffff;
+  --border: var(--gray-100);
+  --muted: var(--gray-500);
+  --surface: var(--gray-50);
+
+  --brand: var(--green-600);
+  --brand-hover: var(--green-900);
+  --brand-contrast: #ffffff;
+
+  --error: var(--red-600);
+  --success: var(--green-600);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fg: #e8e8e8;
-    --bg: #1a1a1a;
-    --border: #444;
+    --fg: var(--gray-50);
+    --bg: var(--gray-850);
+    --border: var(--gray-700);
+    --muted: var(--gray-400);
+    --surface: var(--gray-800);
+
+    --brand: var(--green-400);
+    --brand-hover: #7fc2ac;
+    --brand-contrast: var(--gray-850);
+
+    --error: var(--red-400);
+    --success: var(--green-400);
   }
 }
 
