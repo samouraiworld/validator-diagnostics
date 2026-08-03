@@ -87,6 +87,12 @@ func TestValidateArchive_Valid(t *testing.T) {
 	if string(result.Metadata) != string(validMetadataContent) {
 		t.Errorf("Metadata mismatch")
 	}
+	if len(result.LogGz) == 0 {
+		t.Error("result.LogGz is empty, want the gnoland.log.gz bytes")
+	}
+	if result.LogGz[0] != 0x1f || result.LogGz[1] != 0x8b {
+		t.Errorf("result.LogGz does not start with gzip magic bytes: %x", result.LogGz[:2])
+	}
 }
 
 func TestValidateArchive_RejectsUnexpectedEntry(t *testing.T) {
