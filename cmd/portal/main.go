@@ -37,6 +37,15 @@ import (
 //go:embed static
 var staticFiles embed.FS
 
+// defaultMaxUploadSize is the accepted-upload ceiling this deployment
+// standardises on, and it is deliberately *not* prd.md's "for example
+// 10 GB": every upload is streamed to clamd before it is stored, and
+// clamd refuses anything past its own StreamMaxLength (25 MiB out of the
+// box). The bundled clamd.conf raises that limit to this same 2 GiB, so
+// the two bounds agree; raising one without the other turns oversized
+// uploads into 503s instead of a clean rejection.
+const defaultMaxUploadSize = 2 << 30 // 2 GiB
+
 func main() {
 	remote := flag.String("remote", "", "gno.land RPC endpoint to verify operator pubkeys against, e.g. https://rpc.test13.testnets.gno.land:443")
 	addr := flag.String("addr", "localhost:8080", "address to listen on")
@@ -49,6 +58,8 @@ func main() {
 	exercisePath := flag.String("exercise-path", "./exercise.json", "path to the Phase 3 exercise config file, managed via POST /admin/exercise")
 	scoresPath := flag.String("scores-path", "./scores.json", "path to the Phase 3 scoring records file")
 	clamavAddr := flag.String("clamav-addr", "", "clamd address to scan uploads against (host:port, or unix:/path/to/socket); leave empty to disable AV scanning (NOT recommended for production)")
+	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; must comfortably cover streaming a whole -max-upload-size archive to clamd")
+	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; keep this <= clamd's StreamMaxLength (see clamd.conf) or scannable uploads will be rejected with 503")
 	flag.Parse()
 
 	if *remote == "" {
@@ -79,7 +90,7 @@ func main() {
 
 	var avScanner clamav.Scanner = clamav.NoopScanner{}
 	if *clamavAddr != "" {
-		avScanner = clamav.ClamdScanner{Addr: *clamavAddr}
+		avScanner = clamav.ClamdScanner{Addr: *clamavAddr, Timeout: *clamavTimeout}
 	} else {
 		log.Println("-clamav-addr not set: uploads will NOT be scanned for malware (fine for local dev, not for production)")
 	}
@@ -93,12 +104,13 @@ func main() {
 	mux.Handle("/auth/challenge", auth.ChallengeHandler(nonces))
 	mux.Handle("/auth/verify", auth.VerifyHandler(verifier, sessions))
 	mux.Handle("/submit", &portal.SubmitHandler{
-		Sessions:  sessions,
-		Store:     store,
-		Log:       submissionLog,
-		AVScanner: avScanner,
-		Exercise:  exerciseStore,
-		Scores:    scoresStore,
+		Sessions:      sessions,
+		Store:         store,
+		Log:           submissionLog,
+		AVScanner:     avScanner,
+		Exercise:      exerciseStore,
+		Scores:        scoresStore,
+		MaxUploadSize: *maxUploadSize,
 	})
 	mux.Handle("/admin", portal.AdminAuth(adminPassword, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "admin.html")

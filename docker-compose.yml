@@ -3,6 +3,9 @@ services:
     image: clamav/clamav:stable
     volumes:
       - clamav-data:/var/lib/clamav
+      # Raises clamd's stock 25 MiB stream limit to the 2 GiB the portal
+      # accepts — see the file's own header.
+      - ./clamd.conf:/etc/clamav/clamd.conf:ro
     healthcheck:
       test: ["CMD", "clamdcheck.sh"]
       interval: 30s
@@ -57,6 +60,9 @@ services:
       - -exercise-path=/data/exercise.json
       - -scores-path=/data/scores.json
       - -clamav-addr=clamav:3310
+      - -clamav-timeout=15m
+      # Must stay <= clamd.conf's StreamMaxLength.
+      - -max-upload-size=2147483648
     volumes:
       - portal-logs:/data
     ports:

@@ -79,6 +79,12 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("clamav: unable to start INSTREAM: %w", err)
 	}
 
+	// Created up front, not just before the final read: clamd answers a
+	// stream that exceeds its StreamMaxLength by writing an ERROR line
+	// and closing the connection immediately, so the response may be
+	// waiting for us while we are still writing chunks (see writeFailure).
+	br := bufio.NewReader(conn)
+
 	buf := make([]byte, chunkSize)
 	lenPrefix := make([]byte, 4)
 	for {
@@ -86,10 +92,10 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 		if n > 0 {
 			binary.BigEndian.PutUint32(lenPrefix, uint32(n))
 			if _, err := conn.Write(lenPrefix); err != nil {
-				return Verdict{}, fmt.Errorf("clamav: writing chunk length: %w", err)
+				return Verdict{}, writeFailure("writing chunk length", err, br)
 			}
 			if _, err := conn.Write(buf[:n]); err != nil {
-				return Verdict{}, fmt.Errorf("clamav: writing chunk: %w", err)
+				return Verdict{}, writeFailure("writing chunk", err, br)
 			}
 		}
 		if readErr == io.EOF {
@@ -102,16 +108,23 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 
 	binary.BigEndian.PutUint32(lenPrefix, 0)
 	if _, err := conn.Write(lenPrefix); err != nil {
-		return Verdict{}, fmt.Errorf("clamav: writing terminating chunk: %w", err)
+		return Verdict{}, writeFailure("writing terminating chunk", err, br)
 	}
 
-	line, err := bufio.NewReader(conn).ReadString('\n')
+	line, err := br.ReadString('\n')
 	if err != nil {
 		return Verdict{}, fmt.Errorf("clamav: no response from daemon: %w", err)
 	}
 	line = strings.TrimSpace(line)
 
 	switch {
+	case strings.HasSuffix(line, "ERROR"):
+		// clamd reporting a problem with the request itself rather than a
+		// verdict — most commonly "INSTREAM size limit exceeded." when the
+		// upload is larger than clamd's StreamMaxLength. Still fail-closed,
+		// but named distinctly so an operator can tell a misconfigured size
+		// limit from a daemon that is down or speaking gibberish.
+		return Verdict{}, fmt.Errorf("clamav: clamd protocol error: %s", line)
 	case strings.HasSuffix(line, "OK"):
 		return Verdict{}, nil
 	case strings.HasSuffix(line, "FOUND"):
@@ -120,4 +133,20 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 	default:
 		return Verdict{}, fmt.Errorf("clamav: unrecognized response %q", line)
 	}
+}
+
+// writeFailure turns a mid-stream write error into the most informative
+// error available. When clamd rejects a stream outright (size limit
+// exceeded, database not loaded, ...) it writes its ERROR line and hangs
+// up straight away, so on our side the first symptom is usually a broken
+// pipe on the next chunk write rather than a response line — check for a
+// pending response before reporting the raw write error. Either way this
+// returns an error, keeping the scan fail-closed.
+func writeFailure(stage string, writeErr error, br *bufio.Reader) error {
+	if line, err := br.ReadString('\n'); err == nil {
+		if line = strings.TrimSpace(line); strings.HasSuffix(line, "ERROR") {
+			return fmt.Errorf("clamav: clamd protocol error: %s", line)
+		}
+	}
+	return fmt.Errorf("clamav: %s: %w", stage, writeErr)
 }
