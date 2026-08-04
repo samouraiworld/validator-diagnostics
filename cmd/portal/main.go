@@ -6,8 +6,15 @@
 // -s3-bucket (+ -s3-region/-s3-endpoint, with credentials from the
 // S3_ACCESS_KEY/S3_SECRET_KEY environment variables) for production.
 //
+// Uploads are streamed to clamd for a malware scan before being stored
+// when -clamav-addr is set; the scan fails closed, so keep
+// -max-upload-size at or below clamd's own StreamMaxLength (the bundled
+// clamd.conf sets both to 2 GiB) or real uploads are rejected with 503.
+//
 // Required environment variables:
-//   - ADMIN_PASSWORD — protects /admin and /admin/submissions.
+//   - ADMIN_PASSWORD — protects every admin route: /admin,
+//     /admin/submissions, /admin/exercise,
+//     /admin/submissions/{id}/score, and /admin/summary.
 //   - SESSION_SECRET (optional) — hex-encoded HMAC secret for session
 //     tokens. If unset, a random one is generated for this run (sessions
 //     won't survive a restart — fine for a single exercise, not for a
