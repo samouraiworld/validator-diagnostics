@@ -20,7 +20,7 @@ func TestStore_GetOnMissingFile(t *testing.T) {
 
 func TestStore_SetAndGet(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "scores.json"))
-	want := Result{SubmissionID: "abc", UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 15, Scored: true}
+	want := Result{SubmissionID: "abc", UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 13, Scored: true}
 
 	if err := store.Set(want); err != nil {
 		t.Fatalf("Set: %v", err)
@@ -33,7 +33,7 @@ func TestStore_SetAndGet(t *testing.T) {
 	if !ok {
 		t.Fatal("Get: ok = false, want true")
 	}
-	if got.UploadTimeScore != 20 || got.LogQualityScore != 15 {
+	if got.UploadTimeScore != 20 || got.LogQualityScore != 13 {
 		t.Errorf("Get() = %+v, want %+v", got, want)
 	}
 }

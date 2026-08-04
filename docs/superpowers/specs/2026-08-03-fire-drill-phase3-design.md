@@ -6,9 +6,10 @@
 Phase 2 (artifact collection & submission) are implemented and tested. Phase 3
 ("Analysis & Scoring") is not: there is no automatic verification of genesis
 hash / gnoland version / log time window, no scoring against the PRD's
-5×20-point rubric, and no generated summary. Separately, `prd.md`'s Security
-Considerations section lists a ClamAV scan as a "not yet implemented" defense
-layer.
+5×20-point rubric (later rescaled to 4×25 — see
+`2026-08-04-merge-ack-upload-scoring-design.md`), and no generated summary.
+Separately, `prd.md`'s Security Considerations section lists a ClamAV scan as
+a "not yet implemented" defense layer.
 
 This spec covers both: closing the Phase 3 gap, and adding the ClamAV scan,
 since the ClamAV scan sits directly in the same submission path this work
