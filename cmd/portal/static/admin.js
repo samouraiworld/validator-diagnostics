@@ -36,23 +36,16 @@ function buildScoreForm(id, score) {
   const form = document.createElement("div");
   form.className = "score-form";
 
-  const ackInput = document.createElement("input");
-  ackInput.type = "text";
-  ackInput.placeholder = "2026-07-08T19:00:00Z";
-
   const irqInput = document.createElement("input");
   irqInput.type = "number";
   irqInput.min = "0";
-  irqInput.max = "20";
-  irqInput.placeholder = "0-20";
+  irqInput.max = "25";
+  irqInput.placeholder = "0-25";
 
   // Prefill from what was already recorded, so the form shows the
-  // current values instead of looking permanently unfilled.
-  if (score) {
-    if (score.acknowledged_at) ackInput.value = score.acknowledged_at;
-    if (typeof score.incident_response_quality_score === "number") {
-      irqInput.value = String(score.incident_response_quality_score);
-    }
+  // current value instead of looking permanently unfilled.
+  if (score && typeof score.incident_response_quality_score === "number") {
+    irqInput.value = String(score.incident_response_quality_score);
   }
 
   const actions = document.createElement("div");
@@ -77,7 +70,7 @@ function buildScoreForm(id, score) {
     // relying on the 400 alone.
     const irq = Number(irqInput.value.trim());
     if (irqInput.value.trim() === "" || !Number.isInteger(irq)) {
-      error.textContent = "Incident response quality score is required (whole number, 0-20).";
+      error.textContent = "Incident response quality score is required (whole number, 0-25).";
       return;
     }
 
@@ -87,7 +80,6 @@ function buildScoreForm(id, score) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          acknowledged_at: ackInput.value.trim(),
           incident_response_quality_score: irq,
         }),
       });
@@ -107,8 +99,7 @@ function buildScoreForm(id, score) {
 
   actions.append(button, error);
   form.append(
-    buildLabeledInput("Acknowledged at (UTC)", ackInput),
-    buildLabeledInput("Incident response (0–20)", irqInput),
+    buildLabeledInput("Incident response (0–25)", irqInput),
     actions,
   );
   return form;
