@@ -25,7 +25,7 @@ Then open `http://localhost:8080/` for the validator submission flow, and
 ### Docker (fastest way to start everything)
 
 No Go toolchain or real AWS credentials needed — `docker compose` starts
-the portal plus a local S3-compatible backend (MinIO) together:
+the portal, a local S3-compatible backend (MinIO), and ClamAV for malware scanning:
 
 ```bash
 cp .env.example .env   # fill in REMOTE and ADMIN_PASSWORD at minimum

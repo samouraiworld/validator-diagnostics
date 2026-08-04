@@ -1,4 +1,15 @@
 services:
+  clamav:
+    image: clamav/clamav:stable
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s # first boot downloads the virus database
+
   minio:
     image: minio/minio:latest
     command: server /data --address ":9001" --console-address ":9002"
@@ -29,6 +40,8 @@ services:
     depends_on:
       minio-init:
         condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET:-}
@@ -41,6 +54,9 @@ services:
       - -s3-region=us-east-1
       - -s3-endpoint=http://minio:9001
       - -log-path=/data/submissions.jsonl
+      - -exercise-path=/data/exercise.json
+      - -scores-path=/data/scores.json
+      - -clamav-addr=clamav:3310
     volumes:
       - portal-logs:/data
     ports:
@@ -49,3 +65,4 @@ services:
 volumes:
   minio-data:
   portal-logs:
+  clamav-data:
