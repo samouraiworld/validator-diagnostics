@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
+
+	"github.com/samourai/validator-diagnostics/internal/atomicfile"
 )
 
 // Store persists Result records to a single JSON file, keyed by
@@ -51,45 +52,10 @@ func (s *Store) save(results map[string]Result) error {
 	if err != nil {
 		return fmt.Errorf("unable to marshal scores: %w", err)
 	}
-	if err := writeFileAtomic(s.path, data, 0o644); err != nil {
+	if err := atomicfile.Write(s.path, data, 0o644); err != nil {
 		return fmt.Errorf("unable to write scores %s: %w", s.path, err)
 	}
 	return nil
-}
-
-// writeFileAtomic replaces path with data in one step: write a temp file
-// in the same directory, then rename it over the target, which is atomic
-// on POSIX. os.WriteFile would truncate the existing file first, so a
-// crash or a full disk mid-write would leave a half-written file that
-// fails to parse on the next read — losing every stored score at once,
-// not just the record being written.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	// Cleans up every failure path below; a no-op once the rename
-	// succeeded, since the temp name no longer exists by then.
-	defer os.Remove(tmp)
-
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	// os.CreateTemp always creates with 0600.
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // Get returns the record for id, or (Result{}, false, nil) if none
@@ -133,4 +99,17 @@ func (s *Store) List() ([]Result, error) {
 		list = append(list, r)
 	}
 	return list, nil
+}
+
+// ByID returns every record keyed by SubmissionID, read under a single
+// lock. Callers joining a whole list of submissions against their
+// scores want this rather than a Get per row: Get re-reads and re-parses
+// the entire file each time, and each call takes the lock separately, so
+// a row-by-row join is both O(n) file reads and a set of rows that never
+// existed together at any single moment.
+func (s *Store) ByID() (map[string]Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.all()
 }
