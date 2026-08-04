@@ -94,12 +94,14 @@
 </div>
 
 <div id="panel-validators" class="tab-panel" role="tabpanel" aria-labelledby="tab-validators" hidden>
-  <table id="submissions">
-    <thead>
-      <tr><th>Moniker</th><th>Operator address</th><th>Filename</th><th>Submitted at (UTC)</th><th>Score</th><th>Checks</th><th>Ack / Incident response</th><th><span class="sr-only">Delete</span></th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <div class="table-wrap">
+    <table id="submissions">
+      <thead>
+        <tr><th>Validator</th><th>Score</th><th>Checks</th><th>Manual entry</th><th><span class="sr-only">Delete</span></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <section id="summary-section" class="step">
     <h2>Summary</h2>
     <button id="generate-summary">Generate summary</button>
