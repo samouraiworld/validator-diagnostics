@@ -114,7 +114,7 @@ main {
   flex-shrink: 0;
 }
 
-input[type="text"], input[type="file"] {
+input[type="text"], input[type="file"], textarea {
   display: block;
   width: 100%;
   margin: 0.5rem 0;
@@ -128,7 +128,12 @@ input[type="text"], input[type="file"] {
   border-radius: 6px;
 }
 
-input[type="text"]:focus, input[type="file"]:focus {
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+input[type="text"]:focus, input[type="file"]:focus, textarea:focus {
   outline: 2px solid var(--brand);
   outline-offset: 1px;
   border-color: var(--brand);

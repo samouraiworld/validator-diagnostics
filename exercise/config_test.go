@@ -1,6 +1,7 @@
 package exercise
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -50,4 +51,32 @@ func TestConfig_Configured(t *testing.T) {
 	if !validConfig().Configured() {
 		t.Error("a fully set Config should report Configured() == true")
 	}
+}
+
+func TestConfig_Validate_RequiresSomethingToCheckAgainst(t *testing.T) {
+	// An exercise with no expected genesis hash, or no supported version
+	// list, has nothing to compare a submission against — and the checks
+	// don't report "not configured", they report a mismatch. Every
+	// validator would then be flagged as submitting the wrong genesis or
+	// an unsupported version, with nothing pointing at the config as the
+	// cause. Reject it at the point the admin can still fix it.
+	t.Run("no expected genesis hash", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.ExpectedGenesisSHA256 = "   "
+		if err := cfg.Validate(); err == nil {
+			t.Error("Validate() = nil, want an error")
+		} else if !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("Validate() = %v, want it to wrap ErrInvalidConfig", err)
+		}
+	})
+
+	t.Run("no supported versions", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.SupportedGnolandVersions = nil
+		if err := cfg.Validate(); err == nil {
+			t.Error("Validate() = nil, want an error")
+		} else if !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("Validate() = %v, want it to wrap ErrInvalidConfig", err)
+		}
+	})
 }

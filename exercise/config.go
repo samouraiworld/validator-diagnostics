@@ -7,7 +7,9 @@
 package exercise
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -33,15 +35,34 @@ func (c Config) Configured() bool {
 	return !c.AnnouncedAt.IsZero() || !c.DeadlineAt.IsZero()
 }
 
+// ErrInvalidConfig wraps every error Validate returns, so callers can
+// tell "the admin sent something wrong" (a 400 they can act on) from
+// "the disk is full" (a 500 they can't). Without it both arrive through
+// FileStore.Set's single error return and an unwritable path reads as
+// bad input, leaving the admin retyping a form that was always correct.
+var ErrInvalidConfig = errors.New("invalid exercise config")
+
 // Validate enforces the two timing invariants scoring depends on: a
 // non-empty announce-to-deadline window (scoring.TieredTimeScore
 // divides by its length) and a non-empty investigation window.
 func (c Config) Validate() error {
 	if !c.DeadlineAt.After(c.AnnouncedAt) {
-		return fmt.Errorf("deadline_at (%s) must be after announced_at (%s)", c.DeadlineAt, c.AnnouncedAt)
+		return fmt.Errorf("%w: deadline_at (%s) must be after announced_at (%s)", ErrInvalidConfig, c.DeadlineAt, c.AnnouncedAt)
 	}
 	if !c.InvestigationWindowEnd.After(c.InvestigationWindowStart) {
-		return fmt.Errorf("investigation_window_end (%s) must be after investigation_window_start (%s)", c.InvestigationWindowEnd, c.InvestigationWindowStart)
+		return fmt.Errorf("%w: investigation_window_end (%s) must be after investigation_window_start (%s)", ErrInvalidConfig, c.InvestigationWindowEnd, c.InvestigationWindowStart)
+	}
+	// The genesis and version checks don't have a "not configured"
+	// outcome — they compare, and an empty expectation compares unequal
+	// to everything. Left unset, they'd report every submission as a
+	// mismatch, which reads as the validators being wrong rather than the
+	// exercise being half-configured. Refuse at the point the admin can
+	// still fix it.
+	if strings.TrimSpace(c.ExpectedGenesisSHA256) == "" {
+		return fmt.Errorf("%w: expected_genesis_sha256 is required — without it every submission is reported as a genesis mismatch", ErrInvalidConfig)
+	}
+	if len(c.SupportedGnolandVersions) == 0 {
+		return fmt.Errorf("%w: supported_gnoland_versions must list at least one version — without it every submission is reported as unsupported", ErrInvalidConfig)
 	}
 	return nil
 }

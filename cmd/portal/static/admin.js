@@ -159,7 +159,16 @@ async function loadExerciseConfig() {
     document.getElementById("exercise-error").textContent = "Network error: " + err.message;
     return;
   }
-  if (!resp.ok) return;
+  if (!resp.ok) {
+    // Saving replaces the config wholesale, so a form that silently
+    // failed to load is a loaded gun: fill in two fields, save, and
+    // everything else is wiped. Say so instead of leaving it blank.
+    document.getElementById("exercise-error").textContent =
+      "Unable to load the current exercise config (status " +
+      resp.status +
+      "). Saving now would replace it with whatever this form contains.";
+    return;
+  }
 
   const cfg = await resp.json();
   const setIfPresent = (id, value) => {

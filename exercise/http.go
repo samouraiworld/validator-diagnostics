@@ -2,6 +2,8 @@ package exercise
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"mime"
 	"net/http"
 )
@@ -48,12 +50,27 @@ func ConfigHandler(store *FileStore) http.HandlerFunc {
 				return
 			}
 			var cfg Config
-			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			dec := json.NewDecoder(r.Body)
+			// POST replaces the config wholesale, so silently dropping a
+			// key the admin misspelt doesn't leave the old value in place —
+			// it resets that field to zero. An empty ExpectedGenesisSHA256
+			// then reports every submission as a genesis mismatch, with
+			// nothing to suggest the config is what's wrong.
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&cfg); err != nil {
 				http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
 			if err := store.Set(cfg); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				if errors.Is(err, ErrInvalidConfig) {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				// A storage failure is not the admin's input being wrong,
+				// and the detail (which carries the store's path) belongs
+				// in the server log rather than in the response.
+				log.Printf("exercise: unable to save config: %v", err)
+				http.Error(w, "unable to save exercise config; see the portal server log", http.StatusInternalServerError)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")

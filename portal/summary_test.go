@@ -41,6 +41,8 @@ func TestAdminSummaryHandler(t *testing.T) {
 		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
 		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
 		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
 		Observations:             "Everyone please double-check log rotation settings.",
 	}); err != nil {
 		t.Fatalf("exerciseStore.Set: %v", err)
@@ -114,6 +116,8 @@ func summaryText(t *testing.T, result scoring.Result) string {
 		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
 		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
 		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
 	}); err != nil {
 		t.Fatalf("exerciseStore.Set: %v", err)
 	}
@@ -253,6 +257,8 @@ func TestAdminSummaryHandler_NoObservations(t *testing.T) {
 		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
 		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
 		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
 		Observations:             "", // Empty observations
 	}); err != nil {
 		t.Fatalf("exerciseStore.Set: %v", err)
