@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,6 +160,47 @@ func TestAdminScoreHandler_RejectsOutOfRangeScore(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAdminScoreHandler_RejectsMissingScore(t *testing.T) {
+	// A score the admin never entered must not decode to a valid-looking
+	// 0/20. Recording one would flip Result.Pending() to false and let the
+	// dashboard and the generated summary present a fabricated total as
+	// final — exactly what the pending state exists to prevent.
+	cfg := exercise.Config{
+		AnnouncedAt:              time.Now().UTC().Add(-time.Hour),
+		DeadlineAt:               time.Now().UTC().Add(time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+	}
+
+	bodies := map[string]string{
+		"omitted":       `{"acknowledged_at":"` + time.Now().UTC().Format(time.RFC3339) + `"}`,
+		"null":          `{"acknowledged_at":"` + time.Now().UTC().Format(time.RFC3339) + `","incident_response_quality_score":null}`,
+		"misspelt key":  `{"acknowledged_at":"` + time.Now().UTC().Format(time.RFC3339) + `","incident_response_score":19}`,
+		"empty string":  `{"acknowledged_at":"` + time.Now().UTC().Format(time.RFC3339) + `","incident_response_quality_score":""}`,
+		"missing ack":   `{"incident_response_quality_score":19}`,
+		"unknown field": `{"acknowledged_at":"` + time.Now().UTC().Format(time.RFC3339) + `","incident_response_quality_score":19,"bogus":true}`,
+	}
+
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			srv, scoresStore := newTestScoreServer(t, "entry-1", cfg)
+
+			resp, err := http.Post(srv.URL+"/admin/submissions/entry-1/score", "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+
+			if _, ok, err := scoresStore.Get("entry-1"); err != nil || ok {
+				t.Errorf("scoresStore.Get: ok=%v err=%v, want nothing stored for a rejected request", ok, err)
+			}
+		})
 	}
 }
 

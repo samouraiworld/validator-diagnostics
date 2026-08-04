@@ -10,9 +10,13 @@ import (
 	"github.com/samourai/validator-diagnostics/scoring"
 )
 
+// IncidentResponseQualityScore is a pointer so that an omitted or null
+// field is distinguishable from a deliberate 0 — which is itself a valid
+// score. Decoding a missing score to 0 would flip Result.Pending() to
+// false and present a fabricated total as final.
 type scoreRequest struct {
 	AcknowledgedAt               string `json:"acknowledged_at"`
-	IncidentResponseQualityScore int    `json:"incident_response_quality_score"`
+	IncidentResponseQualityScore *int   `json:"incident_response_quality_score"`
 }
 
 // AdminScoreHandler serves POST /admin/submissions/{id}/score: the
@@ -44,11 +48,20 @@ func AdminScoreHandler(log *FileLog, exerciseStore *exercise.FileStore, scores *
 		}
 
 		var req scoreRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		dec := json.NewDecoder(r.Body)
+		// Reject unknown fields, matching submission.ValidateMetadata: a
+		// misspelt score key would otherwise be silently dropped and stored
+		// as the zero value.
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.IncidentResponseQualityScore < 0 || req.IncidentResponseQualityScore > 20 {
+		if req.IncidentResponseQualityScore == nil {
+			http.Error(w, "incident_response_quality_score is required", http.StatusBadRequest)
+			return
+		}
+		if *req.IncidentResponseQualityScore < 0 || *req.IncidentResponseQualityScore > 20 {
 			http.Error(w, "incident_response_quality_score must be between 0 and 20", http.StatusBadRequest)
 			return
 		}
@@ -94,7 +107,7 @@ func AdminScoreHandler(log *FileLog, exerciseStore *exercise.FileStore, scores *
 		result.AcknowledgedAt = &ackAt
 		ackScore := scoring.TieredTimeScore(ackAt, cfg)
 		result.AckTimeScore = &ackScore
-		irq := req.IncidentResponseQualityScore
+		irq := *req.IncidentResponseQualityScore
 		result.IncidentResponseQualityScore = &irq
 
 		if err := scores.Set(result); err != nil {

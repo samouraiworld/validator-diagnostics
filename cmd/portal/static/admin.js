@@ -41,14 +41,25 @@ function buildScoreForm(id, score) {
   const button = document.createElement("button");
   button.textContent = "Save";
   button.addEventListener("click", async () => {
+    // An empty box gives Number("") === 0 and junk gives NaN, which
+    // JSON.stringify writes as null. Both used to reach the server as a
+    // score the admin never entered, so catch them here too rather than
+    // relying on the 400 alone.
+    const irq = Number(irqInput.value.trim());
+    if (irqInput.value.trim() === "" || !Number.isInteger(irq)) {
+      document.getElementById("admin-error").textContent =
+        "Incident response quality score is required (whole number, 0-20).";
+      return;
+    }
+
     let resp;
     try {
-      resp = await fetch(`/admin/submissions/${id}/score`, {
+      resp = await fetch(`/admin/submissions/${encodeURIComponent(id)}/score`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           acknowledged_at: ackInput.value.trim(),
-          incident_response_quality_score: Number(irqInput.value),
+          incident_response_quality_score: irq,
         }),
       });
     } catch (err) {
