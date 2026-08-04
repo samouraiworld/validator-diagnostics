@@ -61,7 +61,7 @@ func scanLogWindow(logGz []byte, cfg exercise.Config) LogWindowCheck {
 	}
 	defer gz.Close()
 
-	bounded := io.LimitReader(gz, maxLogScanBytes)
+	bounded := &io.LimitedReader{R: gz, N: maxLogScanBytes}
 	scanner := bufio.NewScanner(bounded)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // cap a single buffered line at 1 MiB
 
@@ -83,12 +83,37 @@ func scanLogWindow(logGz []byte, cfg exercise.Config) LogWindowCheck {
 	// scanning stopped early — whatever was found before that point is
 	// still returned, consistent with this being a best-effort check.
 
+	truncated := scanHitCap(bounded, gz)
+
 	if !detected {
-		return LogWindowCheck{}
+		return LogWindowCheck{Truncated: truncated}
 	}
 
-	covered := !first.After(cfg.InvestigationWindowStart) && !last.Before(cfg.InvestigationWindowEnd)
-	return LogWindowCheck{Detected: true, Covered: covered, FirstSeen: first, LastSeen: last}
+	// A real validator log easily exceeds maxLogScanBytes decompressed,
+	// and the cap is ours, not the submitter's fault: when it is what
+	// ended the scan, `last` is simply the last timestamp we bothered to
+	// read and says nothing about whether the log runs to the end of the
+	// investigation window. Judge coverage on the start side only in that
+	// case — otherwise virtually every genuine submission would be marked
+	// as not covering the window and lose log-quality points for it.
+	covered := !first.After(cfg.InvestigationWindowStart)
+	if !truncated {
+		covered = covered && !last.Before(cfg.InvestigationWindowEnd)
+	}
+	return LogWindowCheck{Detected: true, Covered: covered, Truncated: truncated, FirstSeen: first, LastSeen: last}
+}
+
+// scanHitCap reports whether bounded ran out of budget with data still
+// waiting in gz — i.e. the cap ended the scan rather than the log ending
+// on its own. If any budget is left the underlying stream was drained,
+// so there is nothing to probe for.
+func scanHitCap(bounded *io.LimitedReader, gz io.Reader) bool {
+	if bounded.N > 0 {
+		return false
+	}
+	var probe [1]byte
+	n, _ := io.ReadFull(gz, probe[:])
+	return n > 0
 }
 
 // parseLeadingTimestamp tries each of timestampLayouts against the

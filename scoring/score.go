@@ -50,9 +50,20 @@ type LogWindowCheck struct {
 	// — parsing is best-effort, so this is a warning condition, not an
 	// error.
 	Detected bool `json:"detected"`
-	// Covered is true only if Detected and the earliest/latest
-	// recognized timestamps span the full investigation window.
+	// Covered is true if Detected and the recognized timestamps span the
+	// full investigation window. When Truncated is true the tail of the
+	// log was never read, so LastSeen carries no information about the
+	// end of the window and only the start side is checked — see
+	// Truncated.
 	Covered bool `json:"covered"`
+
+	// Truncated is true when scanLogWindow stopped because it hit its own
+	// decompression cap (maxLogScanBytes), not because the log ended. The
+	// cap is ours, so a truncated scan is never held against the
+	// submitter: coverage is decided on the start side alone and the
+	// generated summary reports "could not be fully verified" rather than
+	// the "does not cover the window" warning.
+	Truncated bool `json:"truncated,omitempty"`
 
 	FirstSeen time.Time `json:"first_seen,omitempty"`
 	LastSeen  time.Time `json:"last_seen,omitempty"`

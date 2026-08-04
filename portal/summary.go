@@ -66,6 +66,12 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 			case !result.LogWindow.Covered:
 				b.WriteString("  - ⚠️ logs do not fully cover the investigation window\n")
 			}
+			// Informational, deliberately not a ⚠️ warning: hitting the
+			// scan's own size cap is a limit of this tool, not something
+			// the validator did wrong.
+			if result.LogWindow.Truncated {
+				b.WriteString("  - ℹ️ log coverage could not be fully verified: the scan stopped at its size cap\n")
+			}
 		}
 
 		if cfg.Observations != "" {

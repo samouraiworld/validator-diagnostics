@@ -92,6 +92,101 @@ func TestAdminSummaryHandler(t *testing.T) {
 	}
 }
 
+// summaryText runs AdminSummaryHandler over a single submission carrying
+// result, and returns the generated Markdown.
+func summaryText(t *testing.T, result scoring.Result) string {
+	t.Helper()
+
+	submissionLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	if err := submissionLog.Record(context.Background(), Entry{
+		ID:              result.SubmissionID,
+		Moniker:         "validator",
+		OperatorAddress: "g1xyz",
+		Filename:        "validator-20260709-1830UTC.tar.gz",
+		SubmittedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	if err := exerciseStore.Set(exercise.Config{
+		AnnouncedAt:              time.Now().UTC().Add(-2 * time.Hour),
+		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("exerciseStore.Set: %v", err)
+	}
+
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+	if err := scoresStore.Set(result); err != nil {
+		t.Fatalf("scoresStore.Set: %v", err)
+	}
+
+	srv := httptest.NewServer(AdminSummaryHandler(submissionLog, exerciseStore, scoresStore))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(body)
+}
+
+func TestAdminSummaryHandler_TruncatedLogScan(t *testing.T) {
+	// The scan stopped at its own size cap, so coverage was never
+	// verified. That is this tool's limit, not the validator's fault: the
+	// summary must say so informationally and must not accuse the
+	// validator of submitting logs that don't cover the window.
+	text := summaryText(t, scoring.Result{
+		SubmissionID:     "truncated-1",
+		Scored:           true,
+		GenesisMatch:     true,
+		VersionSupported: true,
+		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: true, Truncated: true},
+		UploadTimeScore:  20,
+		MetadataScore:    20,
+		LogQualityScore:  20,
+	})
+
+	if !strings.Contains(text, "could not be fully verified") {
+		t.Errorf("summary missing the truncated-scan note; got:\n%s", text)
+	}
+	if strings.Contains(text, "do not fully cover") {
+		t.Errorf("summary blames the validator for a scan-cap truncation; got:\n%s", text)
+	}
+}
+
+func TestAdminSummaryHandler_UncoveredLogStillWarns(t *testing.T) {
+	// The counterpart: a genuinely short log (scan never hit its cap)
+	// keeps the original warning.
+	text := summaryText(t, scoring.Result{
+		SubmissionID:     "uncovered-1",
+		Scored:           true,
+		GenesisMatch:     true,
+		VersionSupported: true,
+		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: false},
+		UploadTimeScore:  20,
+		MetadataScore:    20,
+		LogQualityScore:  15,
+	})
+
+	if !strings.Contains(text, "do not fully cover") {
+		t.Errorf("summary missing the coverage warning; got:\n%s", text)
+	}
+	if strings.Contains(text, "could not be fully verified") {
+		t.Errorf("summary shows the truncation note for an untruncated scan; got:\n%s", text)
+	}
+}
+
 func TestAdminSummaryHandler_NoObservations(t *testing.T) {
 	submissionLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
 	if err := submissionLog.Record(context.Background(), Entry{
