@@ -54,6 +54,13 @@ func (s *fakeStore) get(key string) ([]byte, bool) {
 	return data, ok
 }
 
+func (s *fakeStore) Delete(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.saved, key)
+	return nil
+}
+
 type fakeLog struct {
 	mu      sync.Mutex
 	entries []Entry

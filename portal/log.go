@@ -12,6 +12,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/samourai/validator-diagnostics/internal/atomicfile"
 )
 
 // Entry is one recorded successful submission, written by SubmitHandler
@@ -83,6 +85,12 @@ func (l *FileLog) Entries() ([]Entry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	return l.readEntries()
+}
+
+// readEntries reads and parses every entry currently in the log.
+// Callers must hold l.mu.
+func (l *FileLog) readEntries() ([]Entry, error) {
 	data, err := os.ReadFile(l.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return []Entry{}, nil
@@ -109,4 +117,44 @@ func (l *FileLog) Entries() ([]Entry, error) {
 	}
 
 	return entries, nil
+}
+
+// Delete removes the entry with the given ID, rewriting the log file
+// with atomicfile.Write so a torn write can't corrupt the remaining
+// entries. found reports whether an entry with that ID existed.
+func (l *FileLog) Delete(id string) (found bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entries, err := l.readEntries()
+	if err != nil {
+		return false, err
+	}
+
+	remaining := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.ID == id {
+			found = true
+			continue
+		}
+		remaining = append(remaining, e)
+	}
+	if !found {
+		return false, nil
+	}
+
+	var buf bytes.Buffer
+	for _, e := range remaining {
+		data, err := json.Marshal(e)
+		if err != nil {
+			return false, fmt.Errorf("unable to marshal log entry: %w", err)
+		}
+		buf.Write(data)
+		buf.WriteByte('\n')
+	}
+	if err := atomicfile.Write(l.path, buf.Bytes(), 0o644); err != nil {
+		return false, fmt.Errorf("unable to write submission log %s: %w", l.path, err)
+	}
+
+	return true, nil
 }
