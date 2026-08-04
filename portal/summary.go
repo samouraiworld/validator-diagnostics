@@ -34,6 +34,16 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 			return
 		}
 
+		// One read for the whole join — see AdminSubmissionsHandler. It
+		// matters more here: the summary is published, so the rows have to
+		// describe one consistent moment rather than a walk across
+		// however many the scoring file went through while it rendered.
+		results, err := scores.ByID()
+		if err != nil {
+			http.Error(w, "unable to read scoring records", http.StatusInternalServerError)
+			return
+		}
+
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Moniker < entries[j].Moniker })
 
 		var b strings.Builder
@@ -41,11 +51,7 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 		fmt.Fprintf(&b, "**Participation:** %d submission(s)\n\n", len(entries))
 
 		for _, e := range entries {
-			result, ok, err := scores.Get(e.ID)
-			if err != nil {
-				http.Error(w, "unable to read scoring record", http.StatusInternalServerError)
-				return
-			}
+			result, ok := results[e.ID]
 
 			fmt.Fprintf(&b, "- **%s** (%s) — ", e.Moniker, e.OperatorAddress)
 			if !ok || !result.Scored {

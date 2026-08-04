@@ -57,21 +57,26 @@ func AdminSubmissionsHandler(submissionLog *FileLog, scores *scoring.Store) http
 			return
 		}
 
+		// One read for the whole join, not one per row: the dashboard
+		// polls every few seconds, and a Get per entry would re-parse the
+		// entire scores file each time — under a separately acquired lock,
+		// so the rows wouldn't even be a consistent snapshot.
+		results, err := scores.ByID()
+		if err != nil {
+			// Not the same thing as "no score yet": the store itself is
+			// unreadable, so every row's score is unknown, not pending.
+			// Rendering that as a dashboard full of "pending" would hide,
+			// say, a corrupted scores.json indefinitely.
+			log.Printf("admin: unable to read scoring records: %v", err)
+			http.Error(w, "unable to read scoring records — the scores file may be missing or corrupt; see the portal server log", http.StatusInternalServerError)
+			return
+		}
+
 		out := make([]AdminSubmission, 0, len(entries))
 		for _, e := range entries {
 			sub := AdminSubmission{Entry: e, Pending: true}
 
-			result, ok, err := scores.Get(e.ID)
-			if err != nil {
-				// Not the same thing as "no score yet": the store itself
-				// is unreadable, so every row's score is unknown, not
-				// pending. Rendering that as a dashboard full of "pending"
-				// would hide, say, a corrupted scores.json indefinitely.
-				log.Printf("admin: unable to read scoring record for %s: %v", e.ID, err)
-				http.Error(w, "unable to read scoring records — the scores file may be missing or corrupt; see the portal server log", http.StatusInternalServerError)
-				return
-			}
-			if ok {
+			if result, ok := results[e.ID]; ok {
 				sub.Score = &result
 				// Only a record with an automatic half has a total worth
 				// showing. Summing the manual fields of an unscored record
