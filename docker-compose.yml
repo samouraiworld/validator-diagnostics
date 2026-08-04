@@ -1,4 +1,33 @@
 services:
+  clamav:
+    image: clamav/clamav:stable
+    volumes:
+      - clamav-data:/var/lib/clamav
+      # Raises clamd's stock stream limit to the 2 GiB the portal accepts,
+      # and makes it report content it skipped for exceeding a limit
+      # instead of answering OK — see the file's own header. Note this
+      # replaces the image's config wholesale, so anything the stock file
+      # set is gone unless clamd.conf sets it too.
+      - ./clamd.conf:/etc/clamav/clamd.conf:ro
+      # clamd spools each INSTREAM body here (TemporaryDirectory in
+      # clamd.conf). On the container's writable layer, concurrent 2 GiB
+      # uploads would eat the host's Docker storage instead.
+      - clamav-tmp:/var/tmp/clamav
+    # clamd holds the whole signature database resident (~1-2 GB). Without
+    # a ceiling a spike takes the host down with it; with one, the
+    # container is the only casualty and the portal 503s until it is back.
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      # Budget generously: the portal has `condition: service_healthy`, so
+      # exhausting these retries doesn't just delay startup, it fails the
+      # portal container outright. A first-boot CVD download on a slow
+      # link is the case that overruns.
+      retries: 20
+      start_period: 300s # first boot downloads the virus database
+
   minio:
     image: minio/minio:latest
     command: server /data --address ":9001" --console-address ":9002"
@@ -29,6 +58,8 @@ services:
     depends_on:
       minio-init:
         condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET:-}
@@ -41,6 +72,12 @@ services:
       - -s3-region=us-east-1
       - -s3-endpoint=http://minio:9001
       - -log-path=/data/submissions.jsonl
+      - -exercise-path=/data/exercise.json
+      - -scores-path=/data/scores.json
+      - -clamav-addr=clamav:3310
+      - -clamav-timeout=15m
+      # Must stay <= clamd.conf's StreamMaxLength.
+      - -max-upload-size=2147483648
     volumes:
       - portal-logs:/data
     ports:
@@ -49,3 +86,5 @@ services:
 volumes:
   minio-data:
   portal-logs:
+  clamav-data:
+  clamav-tmp:

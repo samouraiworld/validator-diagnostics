@@ -1,0 +1,83 @@
+package exercise
+
+import (
+	"encoding/json"
+	"errors"
+	"log"
+	"mime"
+	"net/http"
+)
+
+// requireJSONContentType rejects anything that isn't application/json
+// (an optional charset parameter is fine), and reports whether the
+// request may proceed.
+//
+// This is the CSRF defence for a state-changing endpoint that sits
+// behind HTTP Basic Auth: a cross-site
+// <form enctype="text/plain"> POST is a CORS "simple request", so it
+// needs no preflight and the browser attaches the admin's cached
+// credentials to it — and a JSON decoder is perfectly happy to decode
+// the JSON-shaped body such a form can produce. Insisting on
+// application/json makes the request non-simple, which forces a
+// preflight this server never approves (it sends no
+// Access-Control-Allow-Origin), so the browser blocks it.
+func requireJSONContentType(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return false
+	}
+	return true
+}
+
+// ConfigHandler serves GET (current config) and POST (replace it) on
+// the same route. Wrap with portal.AdminAuth at the caller — this
+// handler does no authentication of its own.
+func ConfigHandler(store *FileStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			cfg, err := store.Get()
+			if err != nil {
+				http.Error(w, "unable to read exercise config", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+
+		case http.MethodPost:
+			if !requireJSONContentType(w, r) {
+				return
+			}
+			var cfg Config
+			dec := json.NewDecoder(r.Body)
+			// POST replaces the config wholesale, so silently dropping a
+			// key the admin misspelt doesn't leave the old value in place —
+			// it resets that field to zero. An empty ExpectedGenesisSHA256
+			// then reports every submission as a genesis mismatch, with
+			// nothing to suggest the config is what's wrong.
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&cfg); err != nil {
+				http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := store.Set(cfg); err != nil {
+				if errors.Is(err, ErrInvalidConfig) {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				// A storage failure is not the admin's input being wrong,
+				// and the detail (which carries the store's path) belongs
+				// in the server log rather than in the response.
+				log.Printf("exercise: unable to save config: %v", err)
+				http.Error(w, "unable to save exercise config; see the portal server log", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
