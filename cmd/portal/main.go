@@ -28,6 +28,7 @@ import (
 
 	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/portal"
+	"github.com/samourai/validator-diagnostics/scoring"
 	"github.com/samourai/validator-diagnostics/storage"
 )
 
@@ -81,7 +82,7 @@ func main() {
 	mux.Handle("/admin", portal.AdminAuth(adminPassword, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "admin.html")
 	})))
-	mux.Handle("/admin/submissions", portal.AdminAuth(adminPassword, portal.AdminSubmissionsHandler(submissionLog)))
+	mux.Handle("/admin/submissions", portal.AdminAuth(adminPassword, portal.AdminSubmissionsHandler(submissionLog, scoring.NewStore(*logPath+".scores.json"))))
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
 	log.Printf("listening on %s, verifying operator pubkeys against %s", *addr, *remote)

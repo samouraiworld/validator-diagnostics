@@ -4,6 +4,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+
+	"github.com/samourai/validator-diagnostics/scoring"
 )
 
 // AdminAuth wraps next with HTTP Basic Auth, checking only the password
@@ -22,9 +24,18 @@ func AdminAuth(password string, next http.Handler) http.Handler {
 	})
 }
 
-// AdminSubmissionsHandler serves the recorded submissions as a JSON
-// array, oldest first. Wrap it with AdminAuth.
-func AdminSubmissionsHandler(log *FileLog) http.HandlerFunc {
+// AdminSubmission is one row of the admin dashboard: a recorded
+// submission joined with its Phase 3 scoring record, if one exists yet
+// (Score is nil before a submission has been auto-scored — see
+// SubmitHandler's Exercise/Scores wiring).
+type AdminSubmission struct {
+	Entry
+	Score *scoring.Result `json:"score,omitempty"`
+}
+
+// AdminSubmissionsHandler serves the recorded submissions, joined with
+// their scoring records, as a JSON array. Wrap it with AdminAuth.
+func AdminSubmissionsHandler(log *FileLog, scores *scoring.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -37,7 +48,16 @@ func AdminSubmissionsHandler(log *FileLog) http.HandlerFunc {
 			return
 		}
 
+		out := make([]AdminSubmission, 0, len(entries))
+		for _, e := range entries {
+			sub := AdminSubmission{Entry: e}
+			if result, ok, err := scores.Get(e.ID); err == nil && ok {
+				sub.Score = &result
+			}
+			out = append(out, sub)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(entries)
+		_ = json.NewEncoder(w).Encode(out)
 	}
 }
