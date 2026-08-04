@@ -69,12 +69,22 @@ defaults). Uploaded archives and the submission log persist across
 Every accepted upload is streamed to clamd before it is stored, and the
 scan fails closed: an infected verdict *or* any scan failure rejects the
 submission. clamd refuses to scan a stream larger than its own
-`StreamMaxLength`, which is 25 MiB in the stock `clamav/clamav` image, so
-the two limits have to agree or real uploads get rejected with a 503.
+`StreamMaxLength`, which the stock `clamav/clamav` image sets far below
+what this portal accepts, so the two limits have to agree or real uploads
+get rejected with a 503.
 
 `clamd.conf` (bind-mounted by `docker-compose.yml`) raises clamd's stream
 and file limits to **2 GiB**, matching `-max-upload-size`'s default.
 Change one and you must change the other.
+
+It also sets `AlertExceedsMax yes`, which is what stops the AV layer from
+failing *open*. By default clamd silently skips content that exceeds
+`MaxScanSize`/`MaxFileSize` and still answers `stream: OK` — the portal
+would store an unscanned archive as clean. With the setting on, clamd
+reports a `Heuristics.Limits.Exceeded` pseudo-signature instead, which the
+portal treats as a failed scan (503, logged for the operator), not as
+malware. If you see those 503s, raise the limits in `clamd.conf`; don't
+turn the setting off.
 
 ### Admin endpoints
 
@@ -100,8 +110,13 @@ by the dashboard at `/admin`; the `POST` routes accept
    score against, and it is not retroactive.
 2. Announce the drill and collect submissions.
 3. Enter the two manual scores per submission from the dashboard. A total
-   is shown as pending until both are in.
-4. Generate the summary and publish it.
+   is shown as pending until both are in — an incident response quality
+   score is required, and leaving the box empty is rejected rather than
+   recorded as a 0 (which is itself a valid score).
+4. Generate the summary and publish it. A submission whose log scan
+   stopped early is reported as "could not be fully verified" rather than
+   as failing to cover the investigation window: the two are different
+   claims, and only the second is about the validator.
 
 ## How it works
 
