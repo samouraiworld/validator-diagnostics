@@ -390,7 +390,9 @@ Submitted archives come from third parties and **must be treated as untrusted in
 - `submission/metadata.go` — `ValidateMetadata` enforces the Metadata Schema table's enum constraints (`architecture`, `deployment_method`) and required fields, rejecting unknown fields outright.
 - Covered by `submission/*_test.go` (22 test cases), including explicit path-traversal, symlink/hardlink, oversized-entry, and bad-magic-bytes cases — not just the happy path.
 
-Not yet implemented: the sandboxed/ephemeral extraction environment, and the ClamAV defense-in-depth scan — both are deployment/infra concerns layered on top of this validation logic, not something the Go package itself can provide.
+The ClamAV defense-in-depth scan is also implemented: `clamav/clamd.go` streams every accepted upload to a clamd daemon over INSTREAM before it is stored, and `portal.SubmitHandler` fails closed — an infected verdict *or* any scan failure (daemon down, size limit, timeout) rejects the submission and stores nothing. `clamd.conf` in the repo root keeps clamd's stream limit and the portal's `-max-upload-size` in agreement; `-clamav-addr` selects the daemon (unset disables scanning, for local dev only).
+
+Not yet implemented: the sandboxed/ephemeral extraction environment — a deployment/infra concern layered on top of this validation logic, not something the Go package itself can provide.
 
 ## Authentication for the submission pipeline
 

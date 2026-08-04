@@ -43,8 +43,14 @@ func (o Options) withDefaults() Options {
 // still-unvalidated content of metadata.json — pass it to
 // ValidateMetadata separately; filename/structure checks and metadata
 // *content* checks are different concerns with different failure modes.
+// LogGz is the raw, still-gzip-compressed bytes of gnoland.log.gz,
+// already bounded by Options.MaxLogSize — callers that need to look
+// inside the log (see the scoring package) should use this instead of
+// re-reading the raw upload, to avoid two independent parsers
+// interpreting the same untrusted archive differently.
 type Result struct {
 	Metadata []byte
+	LogGz    []byte
 }
 
 // ValidateArchive streams through r (expected to be a gzip-compressed
@@ -79,6 +85,7 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 
 	seen := make(map[string]bool, len(allowedEntries))
 	var metadata []byte
+	var logGz []byte
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -127,6 +134,7 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 			if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
 				return Result{}, fmt.Errorf("%s does not look like a gzip file (bad magic bytes)", LogFileName)
 			}
+			logGz = data
 		case MetadataFileName:
 			metadata = data
 		}
@@ -138,5 +146,5 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 		}
 	}
 
-	return Result{Metadata: metadata}, nil
+	return Result{Metadata: metadata, LogGz: logGz}, nil
 }
