@@ -271,9 +271,9 @@ func TestAdminSummaryHandler_NoObservations(t *testing.T) {
 		GenesisMatch:     true,
 		VersionSupported: true,
 		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: true},
-		UploadTimeScore:  25,
-		MetadataScore:    25,
-		LogQualityScore:  25,
+		UploadTimeScore:  20,
+		MetadataScore:    20,
+		LogQualityScore:  20,
 	}); err != nil {
 		t.Fatalf("scoresStore.Set: %v", err)
 	}
@@ -307,5 +307,91 @@ func TestAdminSummaryHandler_NoObservations(t *testing.T) {
 	}
 	if !strings.Contains(text, "validator") {
 		t.Errorf("summary text missing validator moniker; got:\n%s", text)
+	}
+}
+
+func TestAdminSummaryHandler_NoSubmissions(t *testing.T) {
+	// The state the summary is in for most of an exercise: announced,
+	// nobody has uploaded yet. It has to render, not divide by zero or
+	// emit a headerless blank.
+	submissionLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	if err := exerciseStore.Set(exercise.Config{
+		AnnouncedAt:              time.Now().UTC().Add(-2 * time.Hour),
+		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
+	}); err != nil {
+		t.Fatalf("exerciseStore.Set: %v", err)
+	}
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	srv := httptest.NewServer(AdminSummaryHandler(submissionLog, exerciseStore, scoresStore))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	text := string(body)
+
+	if !strings.Contains(text, "Validator Fire Drill") {
+		t.Errorf("summary missing its heading; got:\n%s", text)
+	}
+	if !strings.Contains(text, "0 submission") {
+		t.Errorf("summary missing a zero participation count; got:\n%s", text)
+	}
+}
+
+func TestAdminHandlers_RejectWrongMethod(t *testing.T) {
+	// All three implement their own method routing, and none of it was
+	// covered.
+	submissionLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	handlers := map[string]http.Handler{
+		"submissions": AdminSubmissionsHandler(submissionLog, scoresStore),
+		"summary":     AdminSummaryHandler(submissionLog, exerciseStore, scoresStore),
+		"exercise":    exercise.ConfigHandler(exerciseStore),
+	}
+	// exercise.ConfigHandler serves GET and POST; the other two are
+	// GET-only.
+	methods := map[string][]string{
+		"submissions": {http.MethodPost, http.MethodPut, http.MethodDelete},
+		"summary":     {http.MethodPost, http.MethodPut, http.MethodDelete},
+		"exercise":    {http.MethodPut, http.MethodDelete},
+	}
+
+	for name, h := range handlers {
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+
+		for _, method := range methods[name] {
+			t.Run(name+" "+method, func(t *testing.T) {
+				req, err := http.NewRequest(method, srv.URL, nil)
+				if err != nil {
+					t.Fatalf("NewRequest: %v", err)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("%s: %v", method, err)
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusMethodNotAllowed {
+					t.Errorf("status = %d, want 405", resp.StatusCode)
+				}
+			})
+		}
 	}
 }

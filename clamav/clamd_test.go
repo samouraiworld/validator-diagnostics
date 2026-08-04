@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,37 +25,45 @@ func fakeClamd(t *testing.T, response string) string {
 	}
 	t.Cleanup(func() { ln.Close() })
 
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		br := bufio.NewReader(conn)
-		cmd, err := br.ReadString('\n')
-		if err != nil || strings.TrimSpace(cmd) != "nINSTREAM" {
-			return
-		}
-
-		for {
-			lenBuf := make([]byte, 4)
-			if _, err := io.ReadFull(br, lenBuf); err != nil {
-				return
-			}
-			n := binary.BigEndian.Uint32(lenBuf)
-			if n == 0 {
-				break
-			}
-			if _, err := io.CopyN(io.Discard, br, int64(n)); err != nil {
-				return
-			}
-		}
-
-		_, _ = conn.Write([]byte(response))
-	}()
+	go serveOneClamdResponse(t, ln, response)
 
 	return ln.Addr().String()
+}
+
+// serveOneClamdResponse accepts one connection on ln, reads a complete
+// INSTREAM session off it, and answers with response. Split out of
+// fakeClamd so the same protocol handling can back a Unix socket
+// listener too.
+func serveOneClamdResponse(t *testing.T, ln net.Listener, response string) {
+	t.Helper()
+
+	conn, err := ln.Accept()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	br := bufio.NewReader(conn)
+	cmd, err := br.ReadString('\n')
+	if err != nil || strings.TrimSpace(cmd) != "nINSTREAM" {
+		return
+	}
+
+	for {
+		lenBuf := make([]byte, 4)
+		if _, err := io.ReadFull(br, lenBuf); err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(lenBuf)
+		if n == 0 {
+			break
+		}
+		if _, err := io.CopyN(io.Discard, br, int64(n)); err != nil {
+			return
+		}
+	}
+
+	_, _ = conn.Write([]byte(response))
 }
 
 // fakeClamdEarlyError is fakeClamd's impatient sibling: it reads only
@@ -278,5 +287,104 @@ func TestClamdScanner_TruncatedResponse(t *testing.T) {
 	verdict, err := scanner.Scan(context.Background(), strings.NewReader("content"))
 	if err == nil {
 		t.Fatalf("expected an error for a truncated response, got nil (verdict=%+v)", verdict)
+	}
+}
+
+func TestClamdScanner_UnixSocket(t *testing.T) {
+	// The deployment uses TCP, but clamd.conf also opens a LocalSocket
+	// and ClamdScanner advertises the "unix:" form. Untested until now.
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "clamd.sock")
+
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go serveOneClamdResponse(t, ln, "stream: OK\n")
+
+	scanner := ClamdScanner{Addr: "unix:" + sock, Timeout: 5 * time.Second}
+	verdict, err := scanner.Scan(context.Background(), strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if verdict.Infected {
+		t.Error("Infected = true, want false")
+	}
+}
+
+func TestClamdScanner_HungDaemonFailsClosedWithinTimeout(t *testing.T) {
+	// The fail-closed guarantee under the most likely production failure:
+	// clamd accepts the connection but never answers (loading signatures,
+	// wedged, out of memory). Scan must return an error, not block the
+	// upload indefinitely.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		// Drain but never reply.
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	scanner := ClamdScanner{Addr: ln.Addr().String(), Timeout: 300 * time.Millisecond}
+	start := time.Now()
+	verdict, err := scanner.Scan(context.Background(), strings.NewReader("payload"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Scan returned verdict %+v and no error, want a timeout error", verdict)
+	}
+	if verdict.Infected {
+		t.Error("Infected = true, want the zero Verdict alongside the error")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Scan took %v, want it bounded by the 300ms timeout", elapsed)
+	}
+}
+
+func TestClamdScanner_CallerContextBeatsLongerTimeout(t *testing.T) {
+	// A caller cancelling early must win over ClamdScanner.Timeout, or a
+	// client that has already hung up keeps a clamd worker busy.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	scanner := ClamdScanner{Addr: ln.Addr().String(), Timeout: time.Hour}
+	start := time.Now()
+	if _, err := scanner.Scan(ctx, strings.NewReader("payload")); err == nil {
+		t.Fatal("Scan succeeded, want the caller's context deadline to end it")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("Scan took %v, want the caller's 200ms deadline to win over Timeout: time.Hour", elapsed)
+	}
+}
+
+func TestClamdScanner_ZeroTimeoutUsesDefault(t *testing.T) {
+	// Timeout: 0 must mean "30s", not "no deadline" — an unbounded scan
+	// is the fail-open this package is built to avoid.
+	addr := fakeClamd(t, "stream: OK\n")
+	scanner := ClamdScanner{} // no Timeout set
+	scanner.Addr = addr
+
+	if _, err := scanner.Scan(context.Background(), strings.NewReader("payload")); err != nil {
+		t.Fatalf("Scan with a zero Timeout: %v", err)
 	}
 }
