@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,12 +15,26 @@ import (
 )
 
 // Entry is one recorded successful submission, written by SubmitHandler
-// and read back by the admin dashboard.
+// and read back by the admin dashboard. ID is the join key between
+// this append-only log and the scoring package's per-submission
+// records (see scoring.Store), which need to support updates that
+// FileLog's append-only model doesn't.
 type Entry struct {
+	ID              string    `json:"id"`
 	Moniker         string    `json:"moniker"`
 	OperatorAddress string    `json:"operator_address"`
 	Filename        string    `json:"filename"`
 	SubmittedAt     time.Time `json:"submitted_at"`
+}
+
+// NewSubmissionID returns a random, URL-safe identifier for a new
+// Entry.
+func NewSubmissionID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("unable to generate submission ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // Log records successful submissions. SubmitHandler treats a nil Log as
