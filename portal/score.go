@@ -98,9 +98,20 @@ func AdminScoreHandler(log *FileLog, exerciseStore *exercise.FileStore, scores *
 			return
 		}
 
-		result, _, err := scores.Get(id)
+		result, ok, err := scores.Get(id)
 		if err != nil {
 			http.Error(w, "unable to read scoring record", http.StatusInternalServerError)
+			return
+		}
+		// Manual scores complete an automatic half; they don't stand in for
+		// one. A submission recorded before the exercise was configured has
+		// no automatic half and can never acquire one — AutoChecks needs
+		// the log bytes, which aren't retained past the request. Writing
+		// manual fields onto it would clear Pending() while the automatic
+		// scores stayed at zero, publishing a total that reads as final and
+		// means nothing.
+		if !ok || !result.Scored {
+			http.Error(w, "submission was never auto-scored (it arrived before the exercise was configured), so it cannot be scored manually", http.StatusConflict)
 			return
 		}
 		result.SubmissionID = id

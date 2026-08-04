@@ -73,8 +73,14 @@ func AdminSubmissionsHandler(submissionLog *FileLog, scores *scoring.Store) http
 			}
 			if ok {
 				sub.Score = &result
-				sub.TotalScore = result.TotalScore()
-				sub.Pending = result.Pending()
+				// Only a record with an automatic half has a total worth
+				// showing. Summing the manual fields of an unscored record
+				// would report, say, 25/100 as final while none of the
+				// automatic points were ever computed.
+				if result.Scored {
+					sub.TotalScore = result.TotalScore()
+					sub.Pending = result.Pending()
+				}
 			}
 			out = append(out, sub)
 		}

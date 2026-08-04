@@ -160,6 +160,50 @@ func TestAdminSubmissionsHandler_TotalAndPending(t *testing.T) {
 	}
 }
 
+func TestAdminSubmissionsHandler_UnscoredIsPendingEvenWithManualScores(t *testing.T) {
+	// A record with manual scores but no automatic half is contradictory:
+	// its total carries none of the automatic points, so presenting it as
+	// final would publish a meaningless "25/100". The scoring endpoint now
+	// refuses to create that state, but records written before it did — or
+	// edited by hand — still exist, so the join has to hold the line too.
+	fileLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	if err := fileLog.Record(context.Background(), Entry{
+		ID: "never-auto-scored", Moniker: "validator", SubmittedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	ack, irq := 20, 5
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+	if err := scoresStore.Set(scoring.Result{
+		SubmissionID: "never-auto-scored", Scored: false,
+		AckTimeScore: &ack, IncidentResponseQualityScore: &irq,
+	}); err != nil {
+		t.Fatalf("scoresStore.Set: %v", err)
+	}
+
+	srv := httptest.NewServer(AdminSubmissionsHandler(fileLog, scoresStore))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var submissions []AdminSubmission
+	if err := json.NewDecoder(resp.Body).Decode(&submissions); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(submissions) != 1 {
+		t.Fatalf("got %d submissions, want 1", len(submissions))
+	}
+	if got := submissions[0]; got.TotalScore != 0 || !got.Pending {
+		t.Errorf("total_score = %d, pending = %v; want 0, true — an unscored submission has no total to show",
+			got.TotalScore, got.Pending)
+	}
+}
+
 func TestAdminSubmissionsHandler_UnreadableScoresIsNotPending(t *testing.T) {
 	// A corrupt or unreadable scores file must not render as a dashboard
 	// full of "pending" rows — that would hide total loss of the scoring
