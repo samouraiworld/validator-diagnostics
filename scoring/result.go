@@ -28,11 +28,6 @@ type Result struct {
 	IncidentResponseQualityScore *int       `json:"incident_response_quality_score,omitempty"`
 }
 
-// TotalScore sums every sub-score against prd.md's 100-point rubric.
-// Manual fields not yet entered count as 0 — callers that need to
-// distinguish "not yet scored" from "scored zero" should check Scored
-// and the two manual pointer fields directly rather than relying on
-// TotalScore alone.
 // Pending reports whether either of the two manual criteria is still
 // unentered, which makes TotalScore a lower bound rather than a final
 // mark. Anything that shows a total to a human — the admin dashboard,
@@ -42,6 +37,10 @@ func (r Result) Pending() bool {
 	return r.AckTimeScore == nil || r.IncidentResponseQualityScore == nil
 }
 
+// TotalScore sums every sub-score against prd.md's 100-point rubric.
+// Manual fields not yet entered count as 0 — callers that need to
+// distinguish "not yet scored" from "scored zero" should check Scored
+// and Pending rather than relying on TotalScore alone.
 func (r Result) TotalScore() int {
 	total := r.UploadTimeScore + r.MetadataScore + r.LogQualityScore
 	if r.AckTimeScore != nil {
