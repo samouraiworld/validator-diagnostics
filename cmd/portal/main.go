@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/samourai/validator-diagnostics/auth"
+	"github.com/samourai/validator-diagnostics/clamav"
+	"github.com/samourai/validator-diagnostics/exercise"
 	"github.com/samourai/validator-diagnostics/portal"
 	"github.com/samourai/validator-diagnostics/scoring"
 	"github.com/samourai/validator-diagnostics/storage"
@@ -44,6 +46,9 @@ func main() {
 	s3Region := flag.String("s3-region", "", "S3-compatible region")
 	s3Endpoint := flag.String("s3-endpoint", "", "S3-compatible endpoint (leave empty for real AWS S3)")
 	logPath := flag.String("log-path", "./submissions.jsonl", "path to the submission log file, read by the admin dashboard")
+	exercisePath := flag.String("exercise-path", "./exercise.json", "path to the Phase 3 exercise config file, managed via POST /admin/exercise")
+	scoresPath := flag.String("scores-path", "./scores.json", "path to the Phase 3 scoring records file")
+	clamavAddr := flag.String("clamav-addr", "", "clamd address to scan uploads against (host:port, or unix:/path/to/socket); leave empty to disable AV scanning (NOT recommended for production)")
 	flag.Parse()
 
 	if *remote == "" {
@@ -69,6 +74,15 @@ func main() {
 	nonces := auth.NewNonceStore()
 	verifier := &auth.Verifier{Remote: *remote, Nonces: nonces}
 	submissionLog := portal.NewFileLog(*logPath)
+	exerciseStore := exercise.NewFileStore(*exercisePath)
+	scoresStore := scoring.NewStore(*scoresPath)
+
+	var avScanner clamav.Scanner = clamav.NoopScanner{}
+	if *clamavAddr != "" {
+		avScanner = clamav.ClamdScanner{Addr: *clamavAddr}
+	} else {
+		log.Println("-clamav-addr not set: uploads will NOT be scanned for malware (fine for local dev, not for production)")
+	}
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -78,11 +92,21 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/challenge", auth.ChallengeHandler(nonces))
 	mux.Handle("/auth/verify", auth.VerifyHandler(verifier, sessions))
-	mux.Handle("/submit", &portal.SubmitHandler{Sessions: sessions, Store: store, Log: submissionLog})
+	mux.Handle("/submit", &portal.SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		Log:       submissionLog,
+		AVScanner: avScanner,
+		Exercise:  exerciseStore,
+		Scores:    scoresStore,
+	})
 	mux.Handle("/admin", portal.AdminAuth(adminPassword, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "admin.html")
 	})))
-	mux.Handle("/admin/submissions", portal.AdminAuth(adminPassword, portal.AdminSubmissionsHandler(submissionLog, scoring.NewStore(*logPath+".scores.json"))))
+	mux.Handle("/admin/submissions", portal.AdminAuth(adminPassword, portal.AdminSubmissionsHandler(submissionLog, scoresStore)))
+	mux.Handle("/admin/exercise", portal.AdminAuth(adminPassword, exercise.ConfigHandler(exerciseStore)))
+	mux.Handle("POST /admin/submissions/{id}/score", portal.AdminAuth(adminPassword, portal.AdminScoreHandler(submissionLog, exerciseStore, scoresStore)))
+	mux.Handle("/admin/summary", portal.AdminAuth(adminPassword, portal.AdminSummaryHandler(submissionLog, exerciseStore, scoresStore)))
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
 	log.Printf("listening on %s, verifying operator pubkeys against %s", *addr, *remote)
