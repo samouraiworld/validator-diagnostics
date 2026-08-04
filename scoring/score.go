@@ -38,16 +38,16 @@ func TieredTimeScore(t time.Time, cfg exercise.Config) int {
 
 	switch {
 	case elapsed <= total/4:
-		return 20
+		return 25
 	case elapsed <= total/2:
-		return 15
+		return 19
 	// total/4*3, not total*3/4: the latter overflows time.Duration's
 	// int64 nanoseconds for a window past ~97 years and wraps negative,
 	// so the tier would never fire.
 	case elapsed <= total/4*3:
-		return 10
+		return 13
 	case elapsed <= total:
-		return 5
+		return 6
 	default:
 		return 0
 	}
@@ -90,12 +90,12 @@ type LogWindowCheck struct {
 // scored, see submission.ValidateArchive — with credit for how well
 // the detected log timestamps cover the investigation window.
 func LogQualityScore(window LogWindowCheck) int {
-	const structuralBase = 10
+	const structuralBase = 13
 	switch {
 	case window.Covered:
-		return structuralBase + 10
+		return structuralBase + 12
 	case window.Detected:
-		return structuralBase + 5
+		return structuralBase + 6
 	default:
 		return structuralBase
 	}
