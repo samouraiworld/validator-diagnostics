@@ -22,18 +22,18 @@ func TestTieredTimeScore(t *testing.T) {
 		at   time.Time
 		want int
 	}{
-		{"at announcement", cfg.AnnouncedAt, 20},
-		// Not 20: an event predating the exercise hasn't happened yet as
+		{"at announcement", cfg.AnnouncedAt, 25},
+		// Not 25: an event predating the exercise hasn't happened yet as
 		// far as the rubric goes. AckTimeScore is admin-typed, so a
 		// mistyped year would otherwise silently earn full marks.
 		{"before announcement", cfg.AnnouncedAt.Add(-time.Minute), 0},
-		{"exactly 25%", cfg.AnnouncedAt.Add(1 * time.Hour), 20},
-		{"just past 25%", cfg.AnnouncedAt.Add(1*time.Hour + time.Second), 15},
-		{"exactly 50%", cfg.AnnouncedAt.Add(2 * time.Hour), 15},
-		{"just past 50%", cfg.AnnouncedAt.Add(2*time.Hour + time.Second), 10},
-		{"exactly 75%", cfg.AnnouncedAt.Add(3 * time.Hour), 10},
-		{"just past 75%", cfg.AnnouncedAt.Add(3*time.Hour + time.Second), 5},
-		{"exactly at deadline (100%)", cfg.DeadlineAt, 5},
+		{"exactly 25%", cfg.AnnouncedAt.Add(1 * time.Hour), 25},
+		{"just past 25%", cfg.AnnouncedAt.Add(1*time.Hour + time.Second), 19},
+		{"exactly 50%", cfg.AnnouncedAt.Add(2 * time.Hour), 19},
+		{"just past 50%", cfg.AnnouncedAt.Add(2*time.Hour + time.Second), 13},
+		{"exactly 75%", cfg.AnnouncedAt.Add(3 * time.Hour), 13},
+		{"just past 75%", cfg.AnnouncedAt.Add(3*time.Hour + time.Second), 6},
+		{"exactly at deadline (100%)", cfg.DeadlineAt, 6},
 		{"just past deadline", cfg.DeadlineAt.Add(time.Second), 0},
 	}
 
@@ -53,9 +53,9 @@ func TestLogQualityScore(t *testing.T) {
 		window LogWindowCheck
 		want   int
 	}{
-		{"fully covered", LogWindowCheck{Detected: true, Covered: true}, 20},
-		{"detected but not covered", LogWindowCheck{Detected: true, Covered: false}, 15},
-		{"nothing detected", LogWindowCheck{}, 10},
+		{"fully covered", LogWindowCheck{Detected: true, Covered: true}, 25},
+		{"detected but not covered", LogWindowCheck{Detected: true, Covered: false}, 19},
+		{"nothing detected", LogWindowCheck{}, 13},
 	}
 
 	for _, c := range cases {
@@ -77,7 +77,7 @@ func TestTieredTimeScore_LongWindowDoesNotOverflow(t *testing.T) {
 	cfg := exercise.Config{AnnouncedAt: announced, DeadlineAt: announced.Add(100 * 365 * 24 * time.Hour)}
 
 	sixtyPercent := announced.Add(60 * 365 * 24 * time.Hour)
-	if got := TieredTimeScore(sixtyPercent, cfg); got != 10 {
-		t.Errorf("TieredTimeScore at 60%% of a 100-year window = %d, want 10", got)
+	if got := TieredTimeScore(sixtyPercent, cfg); got != 13 {
+		t.Errorf("TieredTimeScore at 60%% of a 100-year window = %d, want 13", got)
 	}
 }

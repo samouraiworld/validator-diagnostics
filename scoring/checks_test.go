@@ -159,8 +159,8 @@ func TestScanLogWindow_TruncatedIsNotTreatedAsCovered(t *testing.T) {
 	if window.Covered {
 		t.Error("window.Covered = true, want false: the tail was never read, so coverage was never verified")
 	}
-	if got := LogQualityScore(window); got != 15 {
-		t.Errorf("LogQualityScore = %d, want 15 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
+	if got := LogQualityScore(window); got != 19 {
+		t.Errorf("LogQualityScore = %d, want 19 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
 	}
 }
 
