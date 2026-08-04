@@ -122,3 +122,22 @@ func TestClamdScanner_MalformedResponse(t *testing.T) {
 		t.Fatal("expected an error for an unrecognized response, got nil")
 	}
 }
+
+func TestClamdScanner_TruncatedResponse(t *testing.T) {
+	// The fake server writes a response with no trailing newline and
+	// then closes the connection, simulating a stalled/hung daemon
+	// whose reply never fully arrives (e.g. the connection is dropped,
+	// or a deadline fires, mid-line after "stream: OK" but before the
+	// terminating '\n'). bufio.Reader.ReadString returns a non-nil
+	// error in this case even though it already delivered bytes that
+	// happen to look like a complete, valid response — Scan must treat
+	// that as a failed exchange, not silently accept the partial line
+	// as a clean verdict.
+	addr := fakeClamd(t, "stream: OK")
+	scanner := ClamdScanner{Addr: addr, Timeout: 5 * time.Second}
+
+	verdict, err := scanner.Scan(context.Background(), strings.NewReader("content"))
+	if err == nil {
+		t.Fatalf("expected an error for a truncated response, got nil (verdict=%+v)", verdict)
+	}
+}

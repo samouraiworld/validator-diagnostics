@@ -107,7 +107,7 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 	}
 
 	line, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil && line == "" {
+	if err != nil {
 		return Verdict{}, fmt.Errorf("clamav: no response from daemon: %w", err)
 	}
 	line = strings.TrimSpace(line)
