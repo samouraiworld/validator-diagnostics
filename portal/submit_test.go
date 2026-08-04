@@ -197,6 +197,56 @@ func TestSubmitHandler_Success(t *testing.T) {
 	}
 }
 
+func TestSubmitHandler_StoresOriginalBytesAfterCleanScan(t *testing.T) {
+	// TestSubmitHandler_Success leaves AVScanner nil, so nothing there
+	// covers the scan-then-store sequence: the scanner drains the upload,
+	// and only the Seek(0) that follows makes Store.Save see the archive
+	// rather than zero bytes. Without this test, dropping that rewind
+	// would silently store empty files with the suite still green.
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		AVScanner: fakeScanner{}, // clean verdict, no error
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	filename := "samourai-20260709-1830UTC.tar.gz"
+	body, contentType := multipartUpload(t, filename, archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result submitResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !result.OK {
+		t.Fatalf("submit failed: status=%d ok=%v err=%q", resp.StatusCode, result.OK, result.Error)
+	}
+
+	saved, ok := store.get(filename)
+	if !ok {
+		t.Fatal("archive was not stored")
+	}
+	if !bytes.Equal(saved, archive) {
+		t.Errorf("stored %d bytes, want the %d uploaded bytes unchanged", len(saved), len(archive))
+	}
+}
+
 func TestSubmitHandler_RejectsMissingSession(t *testing.T) {
 	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
 	store := newFakeStore()

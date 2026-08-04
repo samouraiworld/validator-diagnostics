@@ -32,6 +32,7 @@ import (
 	"github.com/samourai/validator-diagnostics/portal"
 	"github.com/samourai/validator-diagnostics/scoring"
 	"github.com/samourai/validator-diagnostics/storage"
+	"github.com/samourai/validator-diagnostics/submission"
 )
 
 //go:embed static
@@ -45,6 +46,18 @@ var staticFiles embed.FS
 // the two bounds agree; raising one without the other turns oversized
 // uploads into 503s instead of a clean rejection.
 const defaultMaxUploadSize = 2 << 30 // 2 GiB
+
+// defaultMaxLogSize caps the gnoland.log.gz entry inside the archive.
+// submission's own default is 2 GiB, which was harmless while those
+// bytes were freed as soon as ValidateArchive returned — but Phase 3
+// keeps them alive through the AV scan and the upload to storage, so
+// they now cost up to that much resident memory per concurrent request.
+// 64 MiB of gzip is on the order of a gigabyte of plaintext log, far
+// more than the 8 MiB scoring.scanLogWindow will ever decompress, while
+// keeping per-request retention bounded. Raise it with -max-log-size if
+// real submissions ever bump into it (they are rejected with a clear
+// message when they do).
+const defaultMaxLogSize = 64 << 20 // 64 MiB
 
 func main() {
 	remote := flag.String("remote", "", "gno.land RPC endpoint to verify operator pubkeys against, e.g. https://rpc.test13.testnets.gno.land:443")
@@ -60,6 +73,7 @@ func main() {
 	clamavAddr := flag.String("clamav-addr", "", "clamd address to scan uploads against (host:port, or unix:/path/to/socket); leave empty to disable AV scanning (NOT recommended for production)")
 	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; must comfortably cover streaming a whole -max-upload-size archive to clamd")
 	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; keep this <= clamd's StreamMaxLength (see clamd.conf) or scannable uploads will be rejected with 503")
+	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of the gnoland.log.gz entry inside the archive; these bytes are held in memory for the whole request")
 	flag.Parse()
 
 	if *remote == "" {
@@ -111,6 +125,8 @@ func main() {
 		Exercise:      exerciseStore,
 		Scores:        scoresStore,
 		MaxUploadSize: *maxUploadSize,
+
+		ArchiveOptions: submission.Options{MaxLogSize: *maxLogSize},
 	})
 	mux.Handle("/admin", portal.AdminAuth(adminPassword, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "admin.html")
