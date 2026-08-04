@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/samourai/validator-diagnostics/auth"
+	"github.com/samourai/validator-diagnostics/clamav"
+	"github.com/samourai/validator-diagnostics/exercise"
+	"github.com/samourai/validator-diagnostics/scoring"
 	"github.com/samourai/validator-diagnostics/storage"
 	"github.com/samourai/validator-diagnostics/submission"
 )
@@ -39,6 +42,19 @@ type SubmitHandler struct {
 	// Log records successful submissions for the admin dashboard.
 	// Optional — a nil Log disables recording.
 	Log Log
+
+	// AVScanner scans uploaded archives for malware before they're
+	// stored (prd.md, "Security Considerations" — ClamAV defense in
+	// depth). A nil AVScanner disables scanning; cmd/portal always
+	// wires clamav.NoopScanner explicitly instead of leaving this nil,
+	// so nil only shows up in tests that don't care about the AV step.
+	AVScanner clamav.Scanner
+
+	// Exercise and Scores wire in the Phase 3 automatic checks and
+	// scoring (see the scoring package). A nil Exercise disables
+	// scoring entirely, same convention as Log.
+	Exercise *exercise.FileStore
+	Scores   *scoring.Store
 
 	// ArchiveOptions bounds ValidateArchive's per-entry reads. Zero
 	// value uses submission's own defaults.
@@ -102,16 +118,16 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// file (a multipart.File) is always Seek-able, whether Go held it
-	// in memory or spilled it to a temp file above — so ValidateArchive
-	// and Store.Save can each take their own full pass over it without
-	// us buffering a second copy ourselves.
-	result, err := submission.ValidateArchive(r.Context(), file, h.ArchiveOptions)
+	// in memory or spilled it to a temp file above — so ValidateArchive,
+	// the AV scan, and Store.Save can each take their own full pass
+	// over it without us buffering a second copy ourselves.
+	archiveResult, err := submission.ValidateArchive(r.Context(), file, h.ArchiveOptions)
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: err.Error()})
 		return
 	}
 
-	metadata, err := submission.ValidateMetadata(result.Metadata)
+	metadata, err := submission.ValidateMetadata(archiveResult.Metadata)
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: err.Error()})
 		return
@@ -134,6 +150,33 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.AVScanner != nil {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to rewind upload"})
+			return
+		}
+		verdict, err := h.AVScanner.Scan(r.Context(), file)
+		if err != nil {
+			log.Printf("antivirus scan for %s failed: %v", header.Filename, err)
+			writeSubmitResult(w, http.StatusServiceUnavailable, submitResponse{
+				Error: "antivirus scan unavailable, please try again shortly",
+			})
+			return
+		}
+		if verdict.Infected {
+			writeSubmitResult(w, http.StatusUnprocessableEntity, submitResponse{
+				Error: fmt.Sprintf("archive rejected: malware detected (%s)", verdict.Signature),
+			})
+			return
+		}
+	}
+
+	submissionID, err := NewSubmissionID()
+	if err != nil {
+		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to prepare submission record"})
+		return
+	}
+
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to rewind upload"})
 		return
@@ -144,8 +187,38 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.Exercise != nil {
+		cfg, err := h.Exercise.Get()
+		if err != nil {
+			log.Printf("scoring: unable to read exercise config for %s: %v", header.Filename, err)
+		} else {
+			result := scoring.Result{SubmissionID: submissionID}
+			if cfg.Configured() {
+				genesisMatch, versionSupported, window := scoring.AutoChecks(metadata, archiveResult.LogGz, cfg)
+				result.Scored = true
+				result.GenesisMatch = genesisMatch
+				result.VersionSupported = versionSupported
+				result.LogWindow = window
+				result.UploadTimeScore = scoring.TieredTimeScore(time.Now().UTC(), cfg)
+				// Always 20: ValidateMetadata above already gated this
+				// submission on a schema-valid metadata.json, so by the
+				// time a Result exists at all, this criterion is
+				// structurally satisfied — see scoring.LogQualityScore's
+				// doc comment for the analogous reasoning on log quality.
+				result.MetadataScore = 20
+				result.LogQualityScore = scoring.LogQualityScore(window)
+			}
+			if h.Scores != nil {
+				if err := h.Scores.Set(result); err != nil {
+					log.Printf("scoring: unable to record result for %s: %v", header.Filename, err)
+				}
+			}
+		}
+	}
+
 	if h.Log != nil {
 		entry := Entry{
+			ID:              submissionID,
 			Moniker:         moniker,
 			OperatorAddress: operatorAddr.String(),
 			Filename:        header.Filename,

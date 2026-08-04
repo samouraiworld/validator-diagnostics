@@ -6,10 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,9 @@ import (
 	"github.com/gnolang/gno/tm2/pkg/crypto"
 
 	"github.com/samourai/validator-diagnostics/auth"
+	"github.com/samourai/validator-diagnostics/clamav"
+	"github.com/samourai/validator-diagnostics/exercise"
+	"github.com/samourai/validator-diagnostics/scoring"
 )
 
 // fakeStore is an in-memory storage.Store, so these tests don't need
@@ -59,6 +64,16 @@ func (l *fakeLog) Record(ctx context.Context, e Entry) error {
 	defer l.mu.Unlock()
 	l.entries = append(l.entries, e)
 	return nil
+}
+
+type fakeScanner struct {
+	verdict clamav.Verdict
+	err     error
+}
+
+func (f fakeScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, error) {
+	_, _ = io.Copy(io.Discard, r) // a real Scanner always drains r; assert callers behave the same
+	return f.verdict, f.err
 }
 
 func buildValidArchive(t *testing.T, validatorAddress string) []byte {
@@ -367,5 +382,198 @@ func TestSubmitHandler_DoesNotRecordLogOnFailure(t *testing.T) {
 	defer submissionLog.mu.Unlock()
 	if len(submissionLog.entries) != 0 {
 		t.Errorf("expected no logged entries on failure, got %+v", submissionLog.entries)
+	}
+}
+
+func TestSubmitHandler_RejectsInfectedArchive(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		AVScanner: fakeScanner{verdict: clamav.Verdict{Infected: true, Signature: "Test-Signature"}},
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	body, contentType := multipartUpload(t, "samourai-20260709-1830UTC.tar.gz", archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	}
+	if len(store.saved) != 0 {
+		t.Error("infected archive should not have been stored")
+	}
+}
+
+func TestSubmitHandler_RejectsWhenAVScannerUnavailable(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		AVScanner: fakeScanner{err: errors.New("connection refused")},
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	body, contentType := multipartUpload(t, "samourai-20260709-1830UTC.tar.gz", archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (fail-closed on scanner unavailability)", resp.StatusCode)
+	}
+	if len(store.saved) != 0 {
+		t.Error("archive should not have been stored when the AV scan could not run")
+	}
+}
+
+func TestSubmitHandler_RecordsScoreWhenExerciseConfigured(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	cfg := exercise.Config{
+		// A 4h announce-to-deadline window with AnnouncedAt just a
+		// minute in the past keeps "submit now" well inside the first
+		// quarter (the first hour), regardless of how long the test
+		// itself takes to run — see scoring.TieredTimeScore.
+		AnnouncedAt:              time.Now().UTC().Add(-time.Minute),
+		DeadlineAt:               time.Now().UTC().Add(4 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
+	}
+	if err := exerciseStore.Set(cfg); err != nil {
+		t.Fatalf("exerciseStore.Set: %v", err)
+	}
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	handler := &SubmitHandler{
+		Sessions: sessions,
+		Store:    store,
+		Log:      submissionLog,
+		Exercise: exerciseStore,
+		Scores:   scoresStore,
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	body, contentType := multipartUpload(t, "samourai-20260709-1830UTC.tar.gz", archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	submissionLog.mu.Lock()
+	id := submissionLog.entries[0].ID
+	submissionLog.mu.Unlock()
+	if id == "" {
+		t.Fatal("recorded entry has no ID")
+	}
+
+	result, ok, err := scoresStore.Get(id)
+	if err != nil {
+		t.Fatalf("scoresStore.Get: %v", err)
+	}
+	if !ok || !result.Scored {
+		t.Fatalf("result = %+v, ok=%v, want a Scored result", result, ok)
+	}
+	if result.MetadataScore != 20 {
+		t.Errorf("MetadataScore = %d, want 20", result.MetadataScore)
+	}
+	if result.UploadTimeScore != 20 {
+		t.Errorf("UploadTimeScore = %d, want 20 (submitted well within the first quarter)", result.UploadTimeScore)
+	}
+}
+
+func TestSubmitHandler_ScoresPendingWhenExerciseNotConfigured(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json")) // never Set
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	handler := &SubmitHandler{
+		Sessions: sessions,
+		Store:    store,
+		Log:      submissionLog,
+		Exercise: exerciseStore,
+		Scores:   scoresStore,
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	body, contentType := multipartUpload(t, "samourai-20260709-1830UTC.tar.gz", archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an unconfigured exercise must not block submission)", resp.StatusCode)
+	}
+
+	submissionLog.mu.Lock()
+	id := submissionLog.entries[0].ID
+	submissionLog.mu.Unlock()
+
+	result, ok, err := scoresStore.Get(id)
+	if err != nil {
+		t.Fatalf("scoresStore.Get: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected a placeholder scoring record even with no exercise configured")
+	}
+	if result.Scored {
+		t.Error("Scored = true, want false when the exercise wasn't configured at submit time")
 	}
 }
