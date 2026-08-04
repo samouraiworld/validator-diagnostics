@@ -68,3 +68,25 @@ func TestLocalStore_DeleteMissingKeyIsNotError(t *testing.T) {
 		t.Errorf("Delete of a missing key: %v, want nil (idempotent)", err)
 	}
 }
+
+func TestLocalStore_DeleteRefusesEmptyKey(t *testing.T) {
+	dir := t.TempDir()
+	store := LocalStore{Dir: dir}
+
+	if err := store.Delete(context.Background(), ""); err == nil {
+		t.Fatal("Delete with an empty key: got nil error, want a rejection")
+	}
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("upload directory was removed (Stat: %v), want it untouched", err)
+	}
+}
+
+func TestLocalStore_SaveRefusesEmptyKey(t *testing.T) {
+	dir := t.TempDir()
+	store := LocalStore{Dir: dir}
+
+	if err := store.Save(context.Background(), "", strings.NewReader("x"), 1); err == nil {
+		t.Fatal("Save with an empty key: got nil error, want a rejection")
+	}
+}

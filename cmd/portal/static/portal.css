@@ -114,6 +114,22 @@ h1, h2 {
   content: "2";
 }
 
+#step-address h2::before {
+  content: "1";
+}
+
+#step-sign h2::before {
+  content: "2";
+}
+
+#step-upload h2::before {
+  content: "3";
+}
+
+#step-done h2::before {
+  content: "4";
+}
+
 .step h2::before {
   display: inline-flex;
   align-items: center;
