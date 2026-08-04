@@ -49,10 +49,17 @@ var timestampLayouts = []string{
 // already read — never a second, independent read of the raw upload
 // (see this repo's Phase 3 design spec, "Security").
 func AutoChecks(meta submission.Metadata, logGz []byte, cfg exercise.Config) (genesisMatch, versionSupported bool, window LogWindowCheck) {
-	genesisMatch = meta.GenesisSHA256 == cfg.ExpectedGenesisSHA256
+	// Compared on content, not presentation. A hash is the same hash in
+	// either case — sha256sum emits lowercase, a block explorer or
+	// Windows CertUtil commonly uppercase — and form fields collect stray
+	// whitespace. A byte-exact comparison would turn a config pasted from
+	// the wrong source into a genesis mismatch reported against every
+	// validator, with nothing to suggest the config is the problem.
+	genesisMatch = strings.EqualFold(strings.TrimSpace(meta.GenesisSHA256), strings.TrimSpace(cfg.ExpectedGenesisSHA256))
 
+	version := strings.TrimSpace(meta.GnolandVersion)
 	for _, v := range cfg.SupportedGnolandVersions {
-		if v == meta.GnolandVersion {
+		if strings.TrimSpace(v) == version {
 			versionSupported = true
 			break
 		}

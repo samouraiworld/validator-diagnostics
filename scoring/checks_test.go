@@ -63,6 +63,28 @@ func TestAutoChecks_GenesisAndVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestAutoChecks_GenesisAndVersionToleratePresentation(t *testing.T) {
+	// sha256sum emits lowercase, but a hash pasted from a block explorer,
+	// a wiki table or Windows CertUtil is commonly uppercase, and form
+	// fields collect stray whitespace. A hash is the same hash either
+	// way; a case difference in the config would otherwise turn every
+	// submission into a genesis-mismatch warning, with nothing pointing
+	// at the config as the cause.
+	cfg := windowTestConfig()
+	cfg.ExpectedGenesisSHA256 = "  ABC123  "
+	cfg.SupportedGnolandVersions = []string{" v1.0.0 ", "v1.0.1"}
+	logGz := gzipLines(t, "2026-07-08T19:00:00Z hello")
+
+	meta := submission.Metadata{GenesisSHA256: "abc123", GnolandVersion: "v1.0.0"}
+	genesisMatch, versionSupported, _ := AutoChecks(meta, logGz, cfg)
+	if !genesisMatch {
+		t.Error("genesisMatch = false, want true: the same hash in a different case is the same hash")
+	}
+	if !versionSupported {
+		t.Error("versionSupported = false, want true: a padded config entry is the same version")
+	}
+}
+
 func TestAutoChecks_LogWindowFullyCovered(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t,
