@@ -138,3 +138,31 @@ func TestStore_EmptyFileIsAnEmptyStore(t *testing.T) {
 		t.Errorf("Get: ok=%v err=%v, want the record written over the empty file", ok, err)
 	}
 }
+
+func TestStore_Delete(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	if err := store.Set(Result{SubmissionID: "abc", Scored: true, UploadTimeScore: 20}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if err := store.Delete("abc"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, ok, err := store.Get("abc")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ok {
+		t.Error("Get after Delete: ok = true, want false")
+	}
+}
+
+func TestStore_Delete_UnknownIDIsNotError(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	if err := store.Delete("never-scored"); err != nil {
+		t.Errorf("Delete of an unknown id: %v, want nil (no-op)", err)
+	}
+}

@@ -85,6 +85,24 @@ func (s *Store) Set(r Result) error {
 	return s.save(results)
 }
 
+// Delete removes the record for id, if any. Deleting an id with no
+// record is a no-op, not an error — a submission may not have been
+// scored yet.
+func (s *Store) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	results, err := s.all()
+	if err != nil {
+		return err
+	}
+	if _, ok := results[id]; !ok {
+		return nil
+	}
+	delete(results, id)
+	return s.save(results)
+}
+
 // List returns every record, in no particular order.
 func (s *Store) List() ([]Result, error) {
 	s.mu.Lock()
