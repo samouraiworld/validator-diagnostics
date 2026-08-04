@@ -243,6 +243,44 @@ document.getElementById("save-exercise").addEventListener("click", async () => {
 
 loadExerciseConfig();
 
+// Tabs: aria-selected/hidden drive the visuals, the URL hash makes each
+// tab linkable/bookmarkable (e.g. sharing a link straight to Validators).
+const tabs = Array.from(document.querySelectorAll(".tab"));
+const panels = {
+  config: document.getElementById("panel-config"),
+  validators: document.getElementById("panel-validators"),
+};
+
+function activateTab(name) {
+  if (!panels[name]) name = "config";
+  for (const tab of tabs) {
+    const selected = tab.dataset.tab === name;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+  }
+  for (const [key, panel] of Object.entries(panels)) {
+    panel.hidden = key !== name;
+  }
+}
+
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => {
+    location.hash = tab.dataset.tab;
+  });
+
+  // Roving tabindex + arrow keys, per the WAI-ARIA tabs pattern.
+  tab.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const next = tabs[(index + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+    next.focus();
+    location.hash = next.dataset.tab;
+  });
+});
+
+window.addEventListener("hashchange", () => activateTab(location.hash.slice(1)));
+activateTab(location.hash.slice(1));
+
 document.getElementById("generate-summary").addEventListener("click", async () => {
   const output = document.getElementById("summary-output");
   let resp;

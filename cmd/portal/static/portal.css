@@ -81,12 +81,12 @@ body {
   line-height: 1.5;
 }
 
-h1, h2 {
-  line-height: 1.25;
+body.wide {
+  max-width: 960px;
 }
 
-main {
-  counter-reset: step;
+h1, h2 {
+  line-height: 1.25;
 }
 
 .step {
@@ -103,9 +103,18 @@ main {
   font-size: 1rem;
 }
 
+/* Numbers are fixed per section rather than a CSS counter: with the two
+   steps now living on separate tabs, only the visible one would ever get
+   counted, so a counter would show "1" for whichever tab is open. */
+#exercise-config h2::before {
+  content: "1";
+}
+
+#summary-section h2::before {
+  content: "2";
+}
+
 .step h2::before {
-  counter-increment: step;
-  content: counter(step);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -289,4 +298,67 @@ details.archive-help ul {
   width: 3.5rem;
   display: inline-block;
   margin: 0 0.25rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.25rem;
+}
+
+.tab {
+  padding: 0.6rem 1rem;
+  margin-bottom: -1px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.tab:hover {
+  background: none;
+  color: var(--fg);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--brand);
+  border-bottom-color: var(--brand);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* .field-grid pairs short config inputs side by side on wide screens
+   instead of one long stacked column; .field--wide opts a field back out
+   (genesis hash / version list are too long to share a row usefully). */
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0 1rem;
+}
+
+@media (min-width: 700px) {
+  .field-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .field--wide {
+    grid-column: 1 / -1;
+  }
+}
+
+.field {
+  margin: 0.5rem 0;
+}
+
+.field input[type="text"] {
+  margin: 0.25rem 0 0;
 }

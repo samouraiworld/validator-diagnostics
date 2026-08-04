@@ -6,7 +6,7 @@
 <title>Validator Fire Drill — Admin</title>
 <link rel="stylesheet" href="/portal.css">
 </head>
-<body>
+<body class="wide">
 <main>
 <header class="site-header">
   <svg class="logo" viewBox="0 0 116 27" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -50,37 +50,62 @@
   </svg>
   <h1>Validator Fire Drill — Submissions</h1>
 </header>
-<section id="exercise-config" class="step">
-  <h2>Exercise configuration</h2>
-  <label for="ex-announced-at">Announced at (UTC, e.g. 2026-07-08T18:00:00Z)</label>
-  <input type="text" id="ex-announced-at" placeholder="2026-07-08T18:00:00Z">
-  <label for="ex-deadline-at">Deadline at (UTC)</label>
-  <input type="text" id="ex-deadline-at" placeholder="2026-07-09T19:30:00Z">
-  <label for="ex-window-start">Investigation window start (UTC)</label>
-  <input type="text" id="ex-window-start" placeholder="2026-07-08T18:00:00Z">
-  <label for="ex-window-end">Investigation window end (UTC)</label>
-  <input type="text" id="ex-window-end" placeholder="2026-07-09T18:30:00Z">
-  <label for="ex-genesis">Expected genesis SHA256 (required)</label>
-  <input type="text" id="ex-genesis" placeholder="deadbeef..." required>
-  <label for="ex-versions">Supported gnoland versions (comma-separated, at least one)</label>
-  <input type="text" id="ex-versions" placeholder="v1.0.0, v1.0.1" required>
-  <label for="ex-observations">Observations (included in the generated summary)</label>
-  <textarea id="ex-observations" rows="4" placeholder="Free text, rendered as a paragraph at the end of the summary."></textarea>
-  <button id="save-exercise">Save exercise config</button>
-  <p class="error" id="exercise-error"></p>
-  <p class="success" id="exercise-saved" hidden>Saved.</p>
-</section>
-<table id="submissions">
-  <thead>
-    <tr><th>Moniker</th><th>Operator address</th><th>Filename</th><th>Submitted at (UTC)</th><th>Score</th><th>Checks</th><th>Ack / Incident response</th></tr>
-  </thead>
-  <tbody></tbody>
-</table>
-<section id="summary-section" class="step">
-  <h2>Summary</h2>
-  <button id="generate-summary">Generate summary</button>
-  <pre id="summary-output" hidden></pre>
-</section>
+
+<div class="tabs" role="tablist" aria-label="Admin sections">
+  <button type="button" class="tab" id="tab-config" role="tab" data-tab="config" aria-selected="true" aria-controls="panel-config">Configuration</button>
+  <button type="button" class="tab" id="tab-validators" role="tab" data-tab="validators" aria-selected="false" tabindex="-1" aria-controls="panel-validators">Validators</button>
+</div>
+
+<div id="panel-config" class="tab-panel" role="tabpanel" aria-labelledby="tab-config">
+  <section id="exercise-config" class="step">
+    <h2>Exercise configuration</h2>
+    <div class="field-grid">
+      <div class="field">
+        <label for="ex-announced-at">Announced at (UTC, e.g. 2026-07-08T18:00:00Z)</label>
+        <input type="text" id="ex-announced-at" placeholder="2026-07-08T18:00:00Z">
+      </div>
+      <div class="field">
+        <label for="ex-deadline-at">Deadline at (UTC)</label>
+        <input type="text" id="ex-deadline-at" placeholder="2026-07-09T19:30:00Z">
+      </div>
+      <div class="field">
+        <label for="ex-window-start">Investigation window start (UTC)</label>
+        <input type="text" id="ex-window-start" placeholder="2026-07-08T18:00:00Z">
+      </div>
+      <div class="field">
+        <label for="ex-window-end">Investigation window end (UTC)</label>
+        <input type="text" id="ex-window-end" placeholder="2026-07-09T18:30:00Z">
+      </div>
+      <div class="field field--wide">
+        <label for="ex-genesis">Expected genesis SHA256 (required)</label>
+        <input type="text" id="ex-genesis" placeholder="deadbeef..." required>
+      </div>
+      <div class="field field--wide">
+        <label for="ex-versions">Supported gnoland versions (comma-separated, at least one)</label>
+        <input type="text" id="ex-versions" placeholder="v1.0.0, v1.0.1" required>
+      </div>
+    </div>
+    <label for="ex-observations">Observations (included in the generated summary)</label>
+    <textarea id="ex-observations" rows="4" placeholder="Free text, rendered as a paragraph at the end of the summary."></textarea>
+    <button id="save-exercise">Save exercise config</button>
+    <p class="error" id="exercise-error"></p>
+    <p class="success" id="exercise-saved" hidden>Saved.</p>
+  </section>
+</div>
+
+<div id="panel-validators" class="tab-panel" role="tabpanel" aria-labelledby="tab-validators" hidden>
+  <table id="submissions">
+    <thead>
+      <tr><th>Moniker</th><th>Operator address</th><th>Filename</th><th>Submitted at (UTC)</th><th>Score</th><th>Checks</th><th>Ack / Incident response</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <section id="summary-section" class="step">
+    <h2>Summary</h2>
+    <button id="generate-summary">Generate summary</button>
+    <pre id="summary-output" hidden></pre>
+  </section>
+</div>
 <p id="admin-error" class="error"></p>
 </main>
 <script src="/admin.js"></script>
