@@ -216,7 +216,7 @@ summary, not a rejection — timestamp parsing is best-effort).
 
 `Covered` means *verified* coverage on both sides, which takes a scan that
 reached the end of the log. A scan that stopped at its own cap, or on an
-over-long line, therefore lands in the middle tier (5) and is reported in
+over-long line, therefore lands in the middle tier (6) and is reported in
 the summary as "could not be fully verified" — never as full marks it
 didn't earn, and never as the ⚠️ warning that the validator's logs fall
 short. Those are three distinct states and the summary emits exactly one
