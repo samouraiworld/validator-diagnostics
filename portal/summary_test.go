@@ -57,7 +57,7 @@ func TestAdminSummaryHandler(t *testing.T) {
 		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: true},
 		UploadTimeScore:  20,
 		MetadataScore:    20,
-		LogQualityScore:  20,
+		LogQualityScore:  25,
 	}); err != nil {
 		t.Fatalf("scoresStore.Set: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestAdminSummaryHandler_TruncatedLogScan(t *testing.T) {
 		LogWindow:       scoring.LogWindowCheck{Detected: true, Covered: false, Truncated: true},
 		UploadTimeScore: 20,
 		MetadataScore:   20,
-		LogQualityScore: 15,
+		LogQualityScore: 19,
 	})
 
 	if !strings.Contains(text, "could not be fully verified") {
@@ -216,7 +216,7 @@ func TestAdminSummaryHandler_UncoveredLogStillWarns(t *testing.T) {
 		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: false},
 		UploadTimeScore:  20,
 		MetadataScore:    20,
-		LogQualityScore:  15,
+		LogQualityScore:  19,
 	})
 
 	if !strings.Contains(text, "do not fully cover") {
@@ -261,7 +261,7 @@ func TestAdminSummaryHandler_NoObservations(t *testing.T) {
 		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: true},
 		UploadTimeScore:  20,
 		MetadataScore:    20,
-		LogQualityScore:  20,
+		LogQualityScore:  25,
 	}); err != nil {
 		t.Fatalf("scoresStore.Set: %v", err)
 	}

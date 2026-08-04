@@ -138,18 +138,36 @@ func TestAdminScoreHandler_AcceptsJSONWithCharset(t *testing.T) {
 }
 
 func TestAdminScoreHandler_RejectsOutOfRangeScore(t *testing.T) {
-	srv, _ := newTestScoreServer(t, "entry-1", true)
-
-	body, _ := json.Marshal(map[string]any{
-		"incident_response_quality_score": 30,
-	})
-	resp, err := http.Post(srv.URL+"/admin/submissions/entry-1/score", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
+	// The rubric's manual criterion runs 0-25 (see the 4x25 rescale in
+	// scoring/score.go); this covers both ends plus the accepted
+	// boundary itself, so a future rescale that forgets to update the
+	// handler's bounds check fails loudly here.
+	cases := map[string]struct {
+		score      int
+		wantStatus int
+	}{
+		"max in range":  {25, http.StatusOK},
+		"just over max": {26, http.StatusBadRequest},
+		"negative":      {-1, http.StatusBadRequest},
+		"way over max":  {30, http.StatusBadRequest},
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newTestScoreServer(t, "entry-1", true)
+
+			body, _ := json.Marshal(map[string]any{
+				"incident_response_quality_score": tc.score,
+			})
+			resp, err := http.Post(srv.URL+"/admin/submissions/entry-1/score", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+		})
 	}
 }
 
