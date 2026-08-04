@@ -362,3 +362,62 @@ details.archive-help ul {
 .field input[type="text"] {
   margin: 0.25rem 0 0;
 }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+dialog {
+  max-width: 28rem;
+  width: calc(100% - 2rem);
+  padding: 1.25rem;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+dialog h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+button.danger {
+  background: var(--error);
+}
+
+button.danger:hover {
+  filter: brightness(0.9);
+}
+
+.icon-button {
+  padding: 0.35rem 0.6rem;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+}
+
+.icon-button:hover {
+  color: var(--error);
+  background: none;
+  border-color: var(--error);
+}

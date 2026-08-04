@@ -96,7 +96,7 @@
 <div id="panel-validators" class="tab-panel" role="tabpanel" aria-labelledby="tab-validators" hidden>
   <table id="submissions">
     <thead>
-      <tr><th>Moniker</th><th>Operator address</th><th>Filename</th><th>Submitted at (UTC)</th><th>Score</th><th>Checks</th><th>Ack / Incident response</th></tr>
+      <tr><th>Moniker</th><th>Operator address</th><th>Filename</th><th>Submitted at (UTC)</th><th>Score</th><th>Checks</th><th>Ack / Incident response</th><th><span class="sr-only">Delete</span></th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -105,6 +105,14 @@
     <button id="generate-summary">Generate summary</button>
     <pre id="summary-output" hidden></pre>
   </section>
+  <dialog id="delete-confirm">
+    <h2>Delete submission</h2>
+    <p id="delete-confirm-body"></p>
+    <div class="dialog-actions">
+      <button type="button" id="delete-cancel">Cancel</button>
+      <button type="button" id="delete-confirm-button" class="danger">Delete</button>
+    </div>
+  </dialog>
 </div>
 <p id="admin-error" class="error"></p>
 </main>

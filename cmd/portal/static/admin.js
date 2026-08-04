@@ -83,6 +83,16 @@ function buildScoreForm(id, score) {
   return form;
 }
 
+function buildDeleteButton(id, moniker, operatorAddress) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-button";
+  button.textContent = "Delete";
+  button.setAttribute("aria-label", `Delete submission from ${moniker}`);
+  button.addEventListener("click", () => openDeleteConfirm(id, moniker, operatorAddress));
+  return button;
+}
+
 async function refresh({ force = false } = {}) {
   // Rebuilding the table throws away whatever is typed into a score
   // form, so the periodic refresh stands down while an admin is mid-entry
@@ -162,6 +172,10 @@ async function refresh({ force = false } = {}) {
     const manualCell = document.createElement("td");
     manualCell.appendChild(buildScoreForm(s.id, s.score));
     row.appendChild(manualCell);
+
+    const deleteCell = document.createElement("td");
+    deleteCell.appendChild(buildDeleteButton(s.id, s.moniker, s.operator_address));
+    row.appendChild(deleteCell);
 
     tbody.appendChild(row);
   }
@@ -297,4 +311,50 @@ document.getElementById("generate-summary").addEventListener("click", async () =
   document.getElementById("admin-error").textContent = "";
   output.textContent = await resp.text();
   output.hidden = false;
+});
+
+// Delete confirmation dialog: shared across all rows, filled in with
+// the target submission each time a row's delete button is clicked.
+const deleteDialog = document.getElementById("delete-confirm");
+const deleteDialogBody = document.getElementById("delete-confirm-body");
+const deleteCancelButton = document.getElementById("delete-cancel");
+const deleteConfirmButton = document.getElementById("delete-confirm-button");
+let pendingDeleteID = null;
+
+function openDeleteConfirm(id, moniker, operatorAddress) {
+  pendingDeleteID = id;
+  deleteDialogBody.textContent =
+    `Delete the submission from ${moniker} (${operatorAddress})? Its score and uploaded archive will also be deleted. This cannot be undone.`;
+  deleteDialog.showModal();
+}
+
+deleteCancelButton.addEventListener("click", () => {
+  pendingDeleteID = null;
+  deleteDialog.close();
+});
+
+deleteConfirmButton.addEventListener("click", async () => {
+  const id = pendingDeleteID;
+  if (!id) return;
+
+  let resp;
+  try {
+    resp = await fetch(`/admin/submissions/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (err) {
+    deleteDialog.close();
+    document.getElementById("admin-error").textContent = "Network error: " + err.message;
+    return;
+  }
+
+  deleteDialog.close();
+  pendingDeleteID = null;
+
+  if (!resp.ok) {
+    const detail = (await resp.text()).trim();
+    document.getElementById("admin-error").textContent =
+      "Unable to delete submission (status " + resp.status + ")" + (detail ? ": " + detail : ".");
+    return;
+  }
+  document.getElementById("admin-error").textContent = "";
+  refresh({ force: true });
 });
