@@ -12,11 +12,11 @@ func TestResult_TotalScore_AutoOnly(t *testing.T) {
 func TestResult_TotalScore_Full(t *testing.T) {
 	ack, irq := 15, 18
 	r := Result{
-		UploadTimeScore:               20,
-		MetadataScore:                 20,
-		LogQualityScore:               20,
-		AckTimeScore:                  &ack,
-		IncidentResponseQualityScore:  &irq,
+		UploadTimeScore:              20,
+		MetadataScore:                20,
+		LogQualityScore:              20,
+		AckTimeScore:                 &ack,
+		IncidentResponseQualityScore: &irq,
 	}
 	if got := r.TotalScore(); got != 93 {
 		t.Errorf("TotalScore() = %d, want 93", got)

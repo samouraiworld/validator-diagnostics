@@ -23,9 +23,9 @@ type Result struct {
 	MetadataScore    int            `json:"metadata_score"`
 	LogQualityScore  int            `json:"log_quality_score"`
 
-	AcknowledgedAt                *time.Time `json:"acknowledged_at,omitempty"`
-	AckTimeScore                  *int       `json:"ack_time_score,omitempty"`
-	IncidentResponseQualityScore  *int       `json:"incident_response_quality_score,omitempty"`
+	AcknowledgedAt               *time.Time `json:"acknowledged_at,omitempty"`
+	AckTimeScore                 *int       `json:"ack_time_score,omitempty"`
+	IncidentResponseQualityScore *int       `json:"incident_response_quality_score,omitempty"`
 }
 
 // TotalScore sums every sub-score against prd.md's 100-point rubric.

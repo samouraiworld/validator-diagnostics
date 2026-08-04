@@ -1,4 +1,3 @@
-// scoring/checks.go
 package scoring
 
 import (

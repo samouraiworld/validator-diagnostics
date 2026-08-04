@@ -1,4 +1,3 @@
-// portal/score_test.go
 package portal
 
 import (

@@ -1,4 +1,3 @@
-// portal/summary.go
 package portal
 
 import (

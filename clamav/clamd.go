@@ -1,4 +1,3 @@
-// clamav/clamd.go
 package clamav
 
 import (
