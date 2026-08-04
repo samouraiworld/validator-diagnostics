@@ -74,3 +74,14 @@ func (s *S3Store) Save(ctx context.Context, key string, body io.Reader, size int
 
 	return nil
 }
+
+func (s *S3Store) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("unable to delete object %q: %w", key, err)
+	}
+	return nil
+}

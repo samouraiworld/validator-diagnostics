@@ -35,3 +35,12 @@ func (s LocalStore) Save(ctx context.Context, key string, body io.Reader, size i
 
 	return nil
 }
+
+func (s LocalStore) Delete(ctx context.Context, key string) error {
+	dest := filepath.Join(s.Dir, filepath.Clean(string(filepath.Separator)+key))
+
+	if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("unable to delete %s: %w", dest, err)
+	}
+	return nil
+}

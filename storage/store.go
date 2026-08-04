@@ -16,4 +16,8 @@ import (
 // validate before calling Save.
 type Store interface {
 	Save(ctx context.Context, key string, body io.Reader, size int64) error
+	// Delete removes the object at key. Deleting a key that doesn't
+	// exist is not an error — callers may retry a delete that partially
+	// succeeded.
+	Delete(ctx context.Context, key string) error
 }
