@@ -50,6 +50,26 @@
   </svg>
   <h1>Validator Fire Drill — Submissions</h1>
 </header>
+<section id="exercise-config" class="step">
+  <h2>Exercise configuration</h2>
+  <label for="ex-announced-at">Announced at (UTC, e.g. 2026-07-08T18:00:00Z)</label>
+  <input type="text" id="ex-announced-at" placeholder="2026-07-08T18:00:00Z">
+  <label for="ex-deadline-at">Deadline at (UTC)</label>
+  <input type="text" id="ex-deadline-at" placeholder="2026-07-09T19:30:00Z">
+  <label for="ex-window-start">Investigation window start (UTC)</label>
+  <input type="text" id="ex-window-start" placeholder="2026-07-08T18:00:00Z">
+  <label for="ex-window-end">Investigation window end (UTC)</label>
+  <input type="text" id="ex-window-end" placeholder="2026-07-09T18:30:00Z">
+  <label for="ex-genesis">Expected genesis SHA256</label>
+  <input type="text" id="ex-genesis" placeholder="deadbeef...">
+  <label for="ex-versions">Supported gnoland versions (comma-separated)</label>
+  <input type="text" id="ex-versions" placeholder="v1.0.0, v1.0.1">
+  <label for="ex-observations">Observations (included in the generated summary)</label>
+  <input type="text" id="ex-observations" placeholder="">
+  <button id="save-exercise">Save exercise config</button>
+  <p class="error" id="exercise-error"></p>
+  <p class="success" id="exercise-saved" hidden>Saved.</p>
+</section>
 <table id="submissions">
   <thead>
     <tr><th>Moniker</th><th>Operator address</th><th>Filename</th><th>Submitted at (UTC)</th></tr>
