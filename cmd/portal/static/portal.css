@@ -245,3 +245,28 @@ details.archive-help ul {
   margin: 0.5rem 0;
   padding-left: 1.25rem;
 }
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-right: 0.25rem;
+}
+
+.badge-ok {
+  background: var(--green-600);
+  color: #ffffff;
+}
+
+.badge-warn {
+  background: var(--red-600);
+  color: #ffffff;
+}
+
+.score-form input {
+  width: 3.5rem;
+  display: inline-block;
+  margin: 0 0.25rem;
+}

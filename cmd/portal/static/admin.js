@@ -1,5 +1,55 @@
 "use strict";
 
+function badge(ok, okText, warnText) {
+  const span = document.createElement("span");
+  span.className = "badge " + (ok ? "badge-ok" : "badge-warn");
+  span.textContent = ok ? okText : warnText;
+  return span;
+}
+
+function buildScoreForm(id) {
+  const form = document.createElement("span");
+  form.className = "score-form";
+
+  const ackInput = document.createElement("input");
+  ackInput.type = "text";
+  ackInput.placeholder = "ack RFC3339";
+
+  const irqInput = document.createElement("input");
+  irqInput.type = "number";
+  irqInput.min = "0";
+  irqInput.max = "20";
+  irqInput.placeholder = "0-20";
+
+  const button = document.createElement("button");
+  button.textContent = "Save";
+  button.addEventListener("click", async () => {
+    let resp;
+    try {
+      resp = await fetch(`/admin/submissions/${id}/score`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          acknowledged_at: ackInput.value.trim(),
+          incident_response_quality_score: Number(irqInput.value),
+        }),
+      });
+    } catch (err) {
+      document.getElementById("admin-error").textContent = "Network error: " + err.message;
+      return;
+    }
+    if (!resp.ok) {
+      document.getElementById("admin-error").textContent = await resp.text();
+      return;
+    }
+    document.getElementById("admin-error").textContent = "";
+    refresh();
+  });
+
+  form.append(ackInput, irqInput, button);
+  return form;
+}
+
 async function refresh() {
   let resp;
   try {
@@ -16,16 +66,36 @@ async function refresh() {
   }
   document.getElementById("admin-error").textContent = "";
 
-  const entries = await resp.json();
+  const submissions = await resp.json();
   const tbody = document.querySelector("#submissions tbody");
   tbody.innerHTML = "";
-  for (const e of entries) {
+  for (const s of submissions) {
     const row = document.createElement("tr");
-    for (const value of [e.moniker, e.operator_address, e.filename, e.submitted_at]) {
+
+    for (const value of [s.moniker, s.operator_address, s.filename, s.submitted_at]) {
       const cell = document.createElement("td");
       cell.textContent = value; // never innerHTML — these are validator-controlled strings
       row.appendChild(cell);
     }
+
+    const scoreCell = document.createElement("td");
+    scoreCell.textContent = s.score && s.score.scored ? `${s.score.upload_time_score + s.score.metadata_score + s.score.log_quality_score + (s.score.ack_time_score || 0) + (s.score.incident_response_quality_score || 0)}/100` : "pending";
+    row.appendChild(scoreCell);
+
+    const checksCell = document.createElement("td");
+    if (s.score && s.score.scored) {
+      checksCell.append(
+        badge(s.score.genesis_match, "genesis ✓", "genesis ✗"),
+        badge(s.score.version_supported, "version ✓", "version ✗"),
+        badge(s.score.log_window.covered, "logs ✓", s.score.log_window.detected ? "logs partial" : "logs ✗"),
+      );
+    }
+    row.appendChild(checksCell);
+
+    const manualCell = document.createElement("td");
+    manualCell.appendChild(buildScoreForm(s.id));
+    row.appendChild(manualCell);
+
     tbody.appendChild(row);
   }
 }
