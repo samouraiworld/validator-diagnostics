@@ -30,6 +30,15 @@ func (s *Store) all() (map[string]Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to read scores %s: %w", s.path, err)
 	}
+	// A present-but-empty file is zero records, same as no file. Left to
+	// json.Unmarshal it is a parse error, and since the dashboard 500s on
+	// an unreadable store (deliberately — see portal.AdminSubmissionsHandler)
+	// a stray `touch` would take the whole admin view down with no way to
+	// recover through the UI. A corrupt file still errors; that one is
+	// worth surfacing rather than silently overwriting.
+	if len(data) == 0 {
+		return map[string]Result{}, nil
+	}
 	var results map[string]Result
 	if err := json.Unmarshal(data, &results); err != nil {
 		return nil, fmt.Errorf("unable to parse scores %s: %w", s.path, err)

@@ -35,6 +35,15 @@ func (s *FileStore) Get() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("unable to read exercise config %s: %w", s.path, err)
 	}
+	// A present-but-empty file is zero records, same as no file. Left to
+	// json.Unmarshal it is a parse error, so a stray `touch` would wedge
+	// the exercise config permanently with nothing an admin could do
+	// about it through the UI. A corrupt (non-empty, unparseable) file
+	// still errors — that one is worth surfacing rather than silently
+	// overwriting.
+	if len(data) == 0 {
+		return Config{}, nil
+	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {

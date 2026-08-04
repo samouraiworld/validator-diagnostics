@@ -27,13 +27,24 @@ func TieredTimeScore(t time.Time, cfg exercise.Config) int {
 		return 0
 	}
 	elapsed := t.Sub(cfg.AnnouncedAt)
+	// An event before the exercise was announced hasn't happened yet as
+	// far as the rubric is concerned. Without this, elapsed is negative
+	// and satisfies the first tier — full marks. That is unreachable for
+	// UploadTimeScore (server clock) but AckTimeScore is typed in by an
+	// admin, where a mistyped year is an ordinary slip.
+	if elapsed < 0 {
+		return 0
+	}
 
 	switch {
 	case elapsed <= total/4:
 		return 20
 	case elapsed <= total/2:
 		return 15
-	case elapsed <= total*3/4:
+	// total/4*3, not total*3/4: the latter overflows time.Duration's
+	// int64 nanoseconds for a window past ~97 years and wraps negative,
+	// so the tier would never fire.
+	case elapsed <= total/4*3:
 		return 10
 	case elapsed <= total:
 		return 5

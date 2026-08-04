@@ -187,6 +187,14 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One server-side timestamp for the whole submission: the score and
+	// the logged entry describe the same event, and two separate
+	// time.Now() calls can straddle a tier boundary, leaving a recorded
+	// SubmittedAt that doesn't justify the UploadTimeScore stored beside
+	// it. Distinct from submittedAt above, which is the validator's own
+	// declared time parsed out of the filename and only echoed back.
+	recordedAt := time.Now().UTC()
+
 	if h.Exercise != nil {
 		cfg, err := h.Exercise.Get()
 		if err != nil {
@@ -199,7 +207,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				result.GenesisMatch = genesisMatch
 				result.VersionSupported = versionSupported
 				result.LogWindow = window
-				result.UploadTimeScore = scoring.TieredTimeScore(time.Now().UTC(), cfg)
+				result.UploadTimeScore = scoring.TieredTimeScore(recordedAt, cfg)
 				// Always 20: ValidateMetadata above already gated this
 				// submission on a schema-valid metadata.json, so by the
 				// time a Result exists at all, this criterion is
@@ -222,7 +230,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Moniker:         moniker,
 			OperatorAddress: operatorAddr.String(),
 			Filename:        header.Filename,
-			SubmittedAt:     time.Now().UTC(),
+			SubmittedAt:     recordedAt,
 		}
 		if err := h.Log.Record(r.Context(), entry); err != nil {
 			// The archive is already safely stored — a logging failure

@@ -112,3 +112,20 @@ func TestFileStore_SetReplacesPreviousConfig(t *testing.T) {
 		t.Errorf("ExpectedGenesisSHA256 = %q, want the second Set's value", got.ExpectedGenesisSHA256)
 	}
 }
+
+func TestFileStore_EmptyFileIsAnUnconfiguredExercise(t *testing.T) {
+	// Same reasoning as scoring.Store: an empty file is zero records, not
+	// a parse failure the admin has no way to recover from.
+	path := filepath.Join(t.TempDir(), "exercise.json")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := NewFileStore(path).Get()
+	if err != nil {
+		t.Fatalf("Get on an empty file: %v", err)
+	}
+	if cfg.Configured() {
+		t.Errorf("Get = %+v, want the zero Config", cfg)
+	}
+}
