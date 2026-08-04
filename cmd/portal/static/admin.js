@@ -7,7 +7,15 @@ function badge(ok, okText, warnText) {
   return span;
 }
 
-function buildScoreForm(id) {
+// isEditing reports whether the admin currently has focus inside the
+// submissions table, i.e. is part-way through entering a manual score.
+function isEditing() {
+  const table = document.getElementById("submissions");
+  const active = document.activeElement;
+  return Boolean(table && active && table.contains(active));
+}
+
+function buildScoreForm(id, score) {
   const form = document.createElement("span");
   form.className = "score-form";
 
@@ -20,6 +28,15 @@ function buildScoreForm(id) {
   irqInput.min = "0";
   irqInput.max = "20";
   irqInput.placeholder = "0-20";
+
+  // Prefill from what was already recorded, so the form shows the
+  // current values instead of looking permanently unfilled.
+  if (score) {
+    if (score.acknowledged_at) ackInput.value = score.acknowledged_at;
+    if (typeof score.incident_response_quality_score === "number") {
+      irqInput.value = String(score.incident_response_quality_score);
+    }
+  }
 
   const button = document.createElement("button");
   button.textContent = "Save";
@@ -43,14 +60,22 @@ function buildScoreForm(id) {
       return;
     }
     document.getElementById("admin-error").textContent = "";
-    refresh();
+    // force: this refresh is the point of the click, and focus is still
+    // inside the table (on this button) when it runs.
+    refresh({ force: true });
   });
 
   form.append(ackInput, irqInput, button);
   return form;
 }
 
-async function refresh() {
+async function refresh({ force = false } = {}) {
+  // Rebuilding the table throws away whatever is typed into a score
+  // form, so the periodic refresh stands down while an admin is mid-entry
+  // (half-written RFC3339 timestamps are easy to lose and annoying to
+  // retype). Explicit refreshes — after a save — still go through.
+  if (!force && isEditing()) return;
+
   let resp;
   try {
     resp = await fetch("/admin/submissions");
@@ -60,8 +85,12 @@ async function refresh() {
   }
 
   if (!resp.ok) {
+    // The body carries the reason (e.g. an unreadable scores file), which
+    // is the difference between a diagnosable failure and a table that
+    // just silently shows everything as pending.
+    const detail = (await resp.text()).trim();
     document.getElementById("admin-error").textContent =
-      "Unable to load submissions (status " + resp.status + ").";
+      "Unable to load submissions (status " + resp.status + ")" + (detail ? ": " + detail : ".");
     return;
   }
   document.getElementById("admin-error").textContent = "";
@@ -78,8 +107,16 @@ async function refresh() {
       row.appendChild(cell);
     }
 
+    // total_score/pending come from the server (portal.AdminSubmission)
+    // — the rubric lives in the scoring package, never in here.
     const scoreCell = document.createElement("td");
-    scoreCell.textContent = s.score && s.score.scored ? `${s.score.upload_time_score + s.score.metadata_score + s.score.log_quality_score + (s.score.ack_time_score || 0) + (s.score.incident_response_quality_score || 0)}/100` : "pending";
+    if (!s.score || !s.score.scored) {
+      scoreCell.textContent = "not yet scored";
+    } else if (s.pending) {
+      scoreCell.textContent = `${s.total_score}/100 (manual scores pending)`;
+    } else {
+      scoreCell.textContent = `${s.total_score}/100`;
+    }
     row.appendChild(scoreCell);
 
     const checksCell = document.createElement("td");
@@ -93,7 +130,7 @@ async function refresh() {
     row.appendChild(checksCell);
 
     const manualCell = document.createElement("td");
-    manualCell.appendChild(buildScoreForm(s.id));
+    manualCell.appendChild(buildScoreForm(s.id, s.score));
     row.appendChild(manualCell);
 
     tbody.appendChild(row);
@@ -101,7 +138,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => refresh(), 5000);
 
 async function loadExerciseConfig() {
   let resp;

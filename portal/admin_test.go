@@ -3,9 +3,12 @@ package portal
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +100,100 @@ func TestAdminSubmissionsHandler(t *testing.T) {
 	}
 	if submissions[0].Score == nil || submissions[0].Score.UploadTimeScore != 20 {
 		t.Errorf("Score = %+v, want a joined scoring.Result with UploadTimeScore 20", submissions[0].Score)
+	}
+}
+
+func TestAdminSubmissionsHandler_TotalAndPending(t *testing.T) {
+	// total_score/pending are computed server-side from scoring.Result so
+	// the dashboard never reimplements the rubric, and so a submission
+	// still missing its manual scores can't be mistaken for a final one.
+	fileLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	for _, id := range []string{"partial", "complete"} {
+		if err := fileLog.Record(context.Background(), Entry{
+			ID:          id,
+			Moniker:     id,
+			SubmittedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	ack, irq := 20, 15
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+	if err := scoresStore.Set(scoring.Result{
+		SubmissionID: "partial", Scored: true,
+		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
+	}); err != nil {
+		t.Fatalf("scoresStore.Set: %v", err)
+	}
+	if err := scoresStore.Set(scoring.Result{
+		SubmissionID: "complete", Scored: true,
+		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
+		AckTimeScore: &ack, IncidentResponseQualityScore: &irq,
+	}); err != nil {
+		t.Fatalf("scoresStore.Set: %v", err)
+	}
+
+	srv := httptest.NewServer(AdminSubmissionsHandler(fileLog, scoresStore))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var submissions []AdminSubmission
+	if err := json.NewDecoder(resp.Body).Decode(&submissions); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	byID := map[string]AdminSubmission{}
+	for _, s := range submissions {
+		byID[s.ID] = s
+	}
+	if got := byID["partial"]; got.TotalScore != 60 || !got.Pending {
+		t.Errorf("partial: total_score = %d, pending = %v; want 60, true", got.TotalScore, got.Pending)
+	}
+	if got := byID["complete"]; got.TotalScore != 95 || got.Pending {
+		t.Errorf("complete: total_score = %d, pending = %v; want 95, false", got.TotalScore, got.Pending)
+	}
+}
+
+func TestAdminSubmissionsHandler_UnreadableScoresIsNotPending(t *testing.T) {
+	// A corrupt or unreadable scores file must not render as a dashboard
+	// full of "pending" rows — that would hide total loss of the scoring
+	// data behind a perfectly normal-looking page.
+	fileLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	if err := fileLog.Record(context.Background(), Entry{
+		ID: "entry-3", Moniker: "samourai", SubmittedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	scoresPath := filepath.Join(t.TempDir(), "scores.json")
+	if err := os.WriteFile(scoresPath, []byte("{ this is not json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	srv := httptest.NewServer(AdminSubmissionsHandler(fileLog, scoring.NewStore(scoresPath)))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), "scoring records") {
+		t.Errorf("body = %q, want it to name the scoring records as the problem", body)
 	}
 }
 

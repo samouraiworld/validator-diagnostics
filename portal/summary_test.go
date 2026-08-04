@@ -141,6 +141,51 @@ func summaryText(t *testing.T, result scoring.Result) string {
 	return string(body)
 }
 
+func TestAdminSummaryHandler_PendingManualScores(t *testing.T) {
+	// This text gets pasted into Discord, so a total that is still
+	// missing manually entered criteria must not read as a final mark.
+	ack := 20
+
+	both := summaryText(t, scoring.Result{
+		SubmissionID: "pending-both", Scored: true,
+		GenesisMatch: true, VersionSupported: true,
+		LogWindow:       scoring.LogWindowCheck{Detected: true, Covered: true},
+		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
+	})
+	if !strings.Contains(both, "60/100 (ack + incident response pending)") {
+		t.Errorf("summary missing the pending annotation; got:\n%s", both)
+	}
+
+	one := summaryText(t, scoring.Result{
+		SubmissionID: "pending-one", Scored: true,
+		GenesisMatch: true, VersionSupported: true,
+		LogWindow:       scoring.LogWindowCheck{Detected: true, Covered: true},
+		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
+		AckTimeScore: &ack,
+	})
+	if !strings.Contains(one, "80/100 (incident response pending)") {
+		t.Errorf("summary missing the partial pending annotation; got:\n%s", one)
+	}
+}
+
+func TestAdminSummaryHandler_CompleteScoreHasNoPendingNote(t *testing.T) {
+	ack, irq := 20, 20
+	text := summaryText(t, scoring.Result{
+		SubmissionID: "complete", Scored: true,
+		GenesisMatch: true, VersionSupported: true,
+		LogWindow:       scoring.LogWindowCheck{Detected: true, Covered: true},
+		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
+		AckTimeScore: &ack, IncidentResponseQualityScore: &irq,
+	})
+
+	if !strings.Contains(text, "100/100\n") {
+		t.Errorf("summary missing the bare final total; got:\n%s", text)
+	}
+	if strings.Contains(text, "pending") {
+		t.Errorf("summary annotates a fully scored submission as pending; got:\n%s", text)
+	}
+}
+
 func TestAdminSummaryHandler_TruncatedLogScan(t *testing.T) {
 	// The scan stopped at its own size cap, so coverage was never
 	// verified. That is this tool's limit, not the validator's fault: the

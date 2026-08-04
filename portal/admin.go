@@ -3,6 +3,7 @@ package portal
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/samourai/validator-diagnostics/scoring"
@@ -31,18 +32,26 @@ func AdminAuth(password string, next http.Handler) http.Handler {
 type AdminSubmission struct {
 	Entry
 	Score *scoring.Result `json:"score,omitempty"`
+
+	// TotalScore and Pending are computed here rather than in the
+	// dashboard's JavaScript so the rubric has exactly one
+	// implementation: scoring.Result's own. TotalScore is 0 and Pending
+	// is true whenever Score is nil or unscored — nothing has been
+	// awarded yet in that case.
+	TotalScore int  `json:"total_score"`
+	Pending    bool `json:"pending"`
 }
 
 // AdminSubmissionsHandler serves the recorded submissions, joined with
 // their scoring records, as a JSON array. Wrap it with AdminAuth.
-func AdminSubmissionsHandler(log *FileLog, scores *scoring.Store) http.HandlerFunc {
+func AdminSubmissionsHandler(submissionLog *FileLog, scores *scoring.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		entries, err := log.Entries()
+		entries, err := submissionLog.Entries()
 		if err != nil {
 			http.Error(w, "unable to read submissions", http.StatusInternalServerError)
 			return
@@ -50,9 +59,22 @@ func AdminSubmissionsHandler(log *FileLog, scores *scoring.Store) http.HandlerFu
 
 		out := make([]AdminSubmission, 0, len(entries))
 		for _, e := range entries {
-			sub := AdminSubmission{Entry: e}
-			if result, ok, err := scores.Get(e.ID); err == nil && ok {
+			sub := AdminSubmission{Entry: e, Pending: true}
+
+			result, ok, err := scores.Get(e.ID)
+			if err != nil {
+				// Not the same thing as "no score yet": the store itself
+				// is unreadable, so every row's score is unknown, not
+				// pending. Rendering that as a dashboard full of "pending"
+				// would hide, say, a corrupted scores.json indefinitely.
+				log.Printf("admin: unable to read scoring record for %s: %v", e.ID, err)
+				http.Error(w, "unable to read scoring records — the scores file may be missing or corrupt; see the portal server log", http.StatusInternalServerError)
+				return
+			}
+			if ok {
 				sub.Score = &result
+				sub.TotalScore = result.TotalScore()
+				sub.Pending = result.Pending()
 			}
 			out = append(out, sub)
 		}

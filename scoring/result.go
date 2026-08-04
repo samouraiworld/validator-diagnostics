@@ -33,6 +33,15 @@ type Result struct {
 // distinguish "not yet scored" from "scored zero" should check Scored
 // and the two manual pointer fields directly rather than relying on
 // TotalScore alone.
+// Pending reports whether either of the two manual criteria is still
+// unentered, which makes TotalScore a lower bound rather than a final
+// mark. Anything that shows a total to a human — the admin dashboard,
+// the Discord summary — has to say so, or a half-scored submission is
+// indistinguishable from a finished one.
+func (r Result) Pending() bool {
+	return r.AckTimeScore == nil || r.IncidentResponseQualityScore == nil
+}
+
 func (r Result) TotalScore() int {
 	total := r.UploadTimeScore + r.MetadataScore + r.LogQualityScore
 	if r.AckTimeScore != nil {
