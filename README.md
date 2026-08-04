@@ -118,6 +118,23 @@ by the dashboard at `/admin`; the `POST` routes accept
    as failing to cover the investigation window: the two are different
    claims, and only the second is about the validator.
 
+> **There is no rescore.** Automatic scores are computed once, at submit
+> time, from the config in force at that moment — the log bytes they were
+> derived from are not retained. So:
+>
+> - A submission that arrived before the exercise was configured is
+>   permanently "not yet scored", and the portal will refuse manual
+>   scores for it (409) rather than record a total made only of the
+>   manual half.
+> - Editing `announced_at`, `deadline_at`, the investigation window, the
+>   expected genesis hash or the supported versions **after** submissions
+>   have landed leaves every existing score computed against the old
+>   values, with no warning and no way to recompute.
+>
+> Both are recoverable by hand — the archives are still in object storage
+> — but nothing in the portal does it for you. Get step 1 right before
+> step 2.
+
 ## How it works
 
 1. **Authentication** (`auth/`) — a validator proves ownership of their
