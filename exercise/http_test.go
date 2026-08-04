@@ -83,6 +83,55 @@ func TestConfigHandler_PostRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestConfigHandler_PostRejectsNonJSONContentType(t *testing.T) {
+	// The shape a cross-site CSRF attempt takes: a form POST carrying a
+	// JSON-shaped body under a "simple request" content type, riding on
+	// the admin's cached Basic credentials. It must be refused before the
+	// body is decoded, leaving the stored config untouched.
+	body, _ := json.Marshal(validConfig())
+
+	for _, contentType := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""} {
+		t.Run("content-type "+contentType, func(t *testing.T) {
+			store := NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+			srv := httptest.NewServer(ConfigHandler(store))
+			defer srv.Close()
+
+			resp, err := http.Post(srv.URL, contentType, bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnsupportedMediaType {
+				t.Fatalf("status = %d, want 415", resp.StatusCode)
+			}
+
+			stored, err := store.Get()
+			if err != nil {
+				t.Fatalf("store.Get: %v", err)
+			}
+			if stored.Configured() {
+				t.Errorf("stored config = %+v, want the request to have been rejected before anything was written", stored)
+			}
+		})
+	}
+}
+
+func TestConfigHandler_PostAcceptsJSONWithCharset(t *testing.T) {
+	store := NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	srv := httptest.NewServer(ConfigHandler(store))
+	defer srv.Close()
+
+	body, _ := json.Marshal(validConfig())
+	resp, err := http.Post(srv.URL, "application/json; charset=utf-8", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestConfigHandler_PostRejectsMalformedJSON(t *testing.T) {
 	store := NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
 	srv := httptest.NewServer(ConfigHandler(store))

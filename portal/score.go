@@ -2,6 +2,7 @@ package portal
 
 import (
 	"encoding/json"
+	"mime"
 	"net/http"
 	"time"
 
@@ -25,6 +26,20 @@ func AdminScoreHandler(log *FileLog, exerciseStore *exercise.FileStore, scores *
 		id := r.PathValue("id")
 		if id == "" {
 			http.Error(w, "missing submission id", http.StatusBadRequest)
+			return
+		}
+
+		// CSRF defence: without this, a cross-site
+		// <form enctype="text/plain"> POST is a CORS "simple request"
+		// that needs no preflight, so the browser would attach the
+		// admin's cached Basic credentials and this handler would decode
+		// the JSON-shaped body it can produce. Requiring
+		// application/json makes the request non-simple, forcing a
+		// preflight that this server (sending no
+		// Access-Control-Allow-Origin) never approves.
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 			return
 		}
 

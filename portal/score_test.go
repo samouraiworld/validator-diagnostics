@@ -79,6 +79,66 @@ func TestAdminScoreHandler_Success(t *testing.T) {
 	}
 }
 
+func TestAdminScoreHandler_RejectsNonJSONContentType(t *testing.T) {
+	// The shape a cross-site CSRF attempt takes: a form POST carrying a
+	// JSON-shaped body under a "simple request" content type, riding on
+	// the admin's cached Basic credentials. It must be refused before the
+	// body is decoded, and nothing may be written to the scores store.
+	cfg := exercise.Config{
+		AnnouncedAt:              time.Now().UTC().Add(-2 * time.Hour),
+		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"acknowledged_at":                 time.Now().UTC().Format(time.RFC3339),
+		"incident_response_quality_score": 20,
+	})
+
+	for _, contentType := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""} {
+		t.Run("content-type "+contentType, func(t *testing.T) {
+			srv, scoresStore := newTestScoreServer(t, "entry-1", cfg)
+
+			resp, err := http.Post(srv.URL+"/admin/submissions/entry-1/score", contentType, bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnsupportedMediaType {
+				t.Fatalf("status = %d, want 415", resp.StatusCode)
+			}
+
+			if _, ok, err := scoresStore.Get("entry-1"); err != nil || ok {
+				t.Errorf("scoresStore.Get: ok=%v err=%v, want the request to have been rejected before anything was stored", ok, err)
+			}
+		})
+	}
+}
+
+func TestAdminScoreHandler_AcceptsJSONWithCharset(t *testing.T) {
+	cfg := exercise.Config{
+		AnnouncedAt:              time.Now().UTC().Add(-2 * time.Hour),
+		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+	}
+	srv, _ := newTestScoreServer(t, "entry-1", cfg)
+
+	body, _ := json.Marshal(map[string]any{
+		"acknowledged_at":                 time.Now().UTC().Format(time.RFC3339),
+		"incident_response_quality_score": 12,
+	})
+	resp, err := http.Post(srv.URL+"/admin/submissions/entry-1/score", "application/json; charset=utf-8", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestAdminScoreHandler_RejectsOutOfRangeScore(t *testing.T) {
 	cfg := exercise.Config{
 		AnnouncedAt:              time.Now().UTC().Add(-time.Hour),
