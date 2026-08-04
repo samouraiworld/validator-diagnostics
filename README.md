@@ -97,7 +97,7 @@ by the dashboard at `/admin`; the `POST` routes accept
 | `GET /admin` | The dashboard itself |
 | `GET /admin/submissions` | Recorded submissions joined with their scores, as JSON |
 | `GET`/`POST /admin/exercise` | Read or replace the exercise config (announce/deadline times, investigation window, expected genesis hash, supported versions, observations) |
-| `POST /admin/submissions/{id}/score` | Enter the two manually judged criteria: acknowledgement time and incident response quality |
+| `POST /admin/submissions/{id}/score` | Enter the one manually judged criterion: incident response quality |
 | `GET /admin/summary` | Generate the Markdown participation/score summary to publish on Discord |
 
 ### Running an exercise
@@ -109,9 +109,9 @@ by the dashboard at `/admin`; the `POST` routes accept
    but recorded as "not yet scored" — automatic scoring has nothing to
    score against, and it is not retroactive.
 2. Announce the drill and collect submissions.
-3. Enter the two manual scores per submission from the dashboard. A total
-   is shown as pending until both are in — an incident response quality
-   score is required, and leaving the box empty is rejected rather than
+3. Enter the manual incident response quality score per submission from
+   the dashboard. A total is shown as pending until it's in — the score
+   is required, and leaving the box empty is rejected rather than
    recorded as a 0 (which is itself a valid score).
 4. Generate the summary and publish it. A submission whose log scan
    stopped early is reported as "could not be fully verified" rather than
@@ -159,8 +159,8 @@ by the dashboard at `/admin`; the `POST` routes accept
    or a failed scan rejects the submission and stores nothing), then
    scored against the configured exercise: genesis hash, gnoland version,
    investigation-window coverage of the submitted log, and upload
-   timeliness. The two criteria no code can observe — acknowledgement time
-   and incident response quality — are entered by an admin afterwards.
+   timeliness. The one criterion no code can observe — incident response
+   quality — is entered by an admin afterwards.
 6. **Frontend** (`cmd/portal/static/`) — a small, framework-free HTML/JS
    UI for both the validator flow and the admin dashboard, embedded into
    the `cmd/portal` binary at build time (`embed.FS`) — one binary, no
