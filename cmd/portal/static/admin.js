@@ -166,3 +166,21 @@ document.getElementById("save-exercise").addEventListener("click", async () => {
 });
 
 loadExerciseConfig();
+
+document.getElementById("generate-summary").addEventListener("click", async () => {
+  const output = document.getElementById("summary-output");
+  let resp;
+  try {
+    resp = await fetch("/admin/summary");
+  } catch (err) {
+    document.getElementById("admin-error").textContent = "Network error: " + err.message;
+    return;
+  }
+  if (!resp.ok) {
+    document.getElementById("admin-error").textContent = "Unable to generate summary (status " + resp.status + ").";
+    return;
+  }
+  document.getElementById("admin-error").textContent = "";
+  output.textContent = await resp.text();
+  output.hidden = false;
+});
