@@ -16,7 +16,6 @@ This exercise is **not intended to identify or punish validators**. Its objectiv
 
 The fire drill evaluates several aspects of validator operations:
 
-- Time required to acknowledge the incident.
 - Time required to submit the requested artifacts.
 - Ability to follow a standardized incident-response procedure.
 - Completeness and accuracy of the submitted information.
@@ -313,11 +312,10 @@ Each exercise can be scored.
 
 | Metric | Score |
 |---------|------:|
-| Acknowledgement time | 20 |
-| Upload completion time | 20 |
-| Metadata completeness | 20 |
-| Log quality | 20 |
-| Incident response quality | 20 |
+| Upload completion time | 25 |
+| Metadata completeness | 25 |
+| Log quality | 25 |
+| Incident response quality | 25 |
 
 Maximum score:
 
