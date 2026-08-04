@@ -1,6 +1,7 @@
 package exercise
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -31,6 +32,42 @@ func TestFileStore_SetAndGet(t *testing.T) {
 	}
 	if !got.AnnouncedAt.Equal(want.AnnouncedAt) || got.ExpectedGenesisSHA256 != want.ExpectedGenesisSHA256 {
 		t.Errorf("Get() = %+v, want %+v", got, want)
+	}
+}
+
+func TestFileStore_SetWritesAtomically(t *testing.T) {
+	// The write goes through a temp file renamed over the target, so the
+	// target must be the only file left behind (no *.tmp debris) and it
+	// must carry the store's own 0644, not os.CreateTemp's 0600.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "exercise.json")
+	store := NewFileStore(path)
+
+	if err := store.Set(validConfig()); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := store.Set(validConfig()); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "exercise.json" {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("directory contains %v, want only exercise.json", names)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("mode = %v, want 0644", perm)
 	}
 }
 

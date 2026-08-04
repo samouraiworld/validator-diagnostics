@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -57,8 +58,43 @@ func (s *FileStore) Set(cfg Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := os.WriteFile(s.path, data, 0o644); err != nil {
+	if err := writeFileAtomic(s.path, data, 0o644); err != nil {
 		return fmt.Errorf("unable to write exercise config %s: %w", s.path, err)
 	}
 	return nil
+}
+
+// writeFileAtomic replaces path with data in one step: write a temp file
+// in the same directory, then rename it over the target, which is atomic
+// on POSIX. os.WriteFile would truncate the existing file first, so a
+// crash or a full disk mid-write would leave a half-written file that
+// fails to parse on the next read — losing the whole exercise config
+// rather than just the update that failed.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	// Cleans up every failure path below; a no-op once the rename
+	// succeeded, since the temp name no longer exists by then.
+	defer os.Remove(tmp)
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	// os.CreateTemp always creates with 0600.
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
