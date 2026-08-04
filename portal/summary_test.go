@@ -196,10 +196,13 @@ func TestAdminSummaryHandler_TruncatedLogScan(t *testing.T) {
 		Scored:           true,
 		GenesisMatch:     true,
 		VersionSupported: true,
-		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: true, Truncated: true},
-		UploadTimeScore:  20,
-		MetadataScore:    20,
-		LogQualityScore:  20,
+		// The reachable shape: a truncated scan cannot verify the end of
+		// the window, so Covered is false. What distinguishes it from a
+		// genuinely short log is Truncated, and only that.
+		LogWindow:       scoring.LogWindowCheck{Detected: true, Covered: false, Truncated: true},
+		UploadTimeScore: 20,
+		MetadataScore:   20,
+		LogQualityScore: 15,
 	})
 
 	if !strings.Contains(text, "could not be fully verified") {

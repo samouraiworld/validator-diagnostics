@@ -20,7 +20,20 @@ import (
 // own content is itself gzip-compressed plaintext that ValidateArchive
 // never decompresses, so this is the first place that decompression
 // happens, and it needs its own bomb protection.
-const maxLogScanBytes = 8 << 20 // 8 MiB of plaintext is far more than needed to find a first/last timestamp
+//
+// It is set well above a plausible validator log rather than at the
+// smallest workable value, because the budget running out is not a free
+// outcome: the end of the log is what proves investigation-window
+// coverage, and a scan that stops early can only report the coverage as
+// unverified (see LogWindowCheck.Truncated). Nothing is retained as it
+// scans, so the cost of a large budget is decompression time, not
+// memory.
+const maxLogScanBytes = 1 << 30 // 1 GiB of plaintext
+
+// maxLogLineBytes caps a single buffered line. A line longer than this
+// ends the scan (bufio.ErrTooLong), which counts as truncation for the
+// same reason the byte budget does.
+const maxLogLineBytes = 1 << 20
 
 // timestampLayouts are tried, in order, against the first
 // whitespace-delimited token of each log line.
@@ -45,25 +58,27 @@ func AutoChecks(meta submission.Metadata, logGz []byte, cfg exercise.Config) (ge
 		}
 	}
 
-	window = scanLogWindow(logGz, cfg)
+	window = scanLogWindow(logGz, cfg, maxLogScanBytes)
 	return genesisMatch, versionSupported, window
 }
 
-// scanLogWindow decompresses logGz under its own bounded reader and
-// looks for a recognizable timestamp at the start of each line,
-// best-effort: an unparseable or non-gzip input simply yields the zero
-// LogWindowCheck rather than an error, since gnoland's exact log format
-// isn't part of prd.md's contract.
-func scanLogWindow(logGz []byte, cfg exercise.Config) LogWindowCheck {
+// scanLogWindow decompresses logGz under a reader bounded to budget
+// decompressed bytes and looks for a recognizable timestamp at the start
+// of each line, best-effort: an unparseable or non-gzip input simply
+// yields the zero LogWindowCheck rather than an error, since gnoland's
+// exact log format isn't part of prd.md's contract. budget is a
+// parameter rather than a constant so tests can exercise the truncation
+// path without generating maxLogScanBytes of input.
+func scanLogWindow(logGz []byte, cfg exercise.Config, budget int64) LogWindowCheck {
 	gz, err := gzip.NewReader(bytes.NewReader(logGz))
 	if err != nil {
 		return LogWindowCheck{}
 	}
 	defer gz.Close()
 
-	bounded := &io.LimitedReader{R: gz, N: maxLogScanBytes}
+	bounded := &io.LimitedReader{R: gz, N: budget}
 	scanner := bufio.NewScanner(bounded)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // cap a single buffered line at 1 MiB
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineBytes)
 
 	var first, last time.Time
 	var detected bool
@@ -73,33 +88,37 @@ func scanLogWindow(logGz []byte, cfg exercise.Config) LogWindowCheck {
 		if !ok {
 			continue
 		}
-		if !detected {
+		// Earliest and latest, not first line and last line: rotated logs
+		// concatenated out of order and interleaved goroutine output both
+		// break the monotonicity that assumption would need.
+		if !detected || ts.Before(first) {
 			first = ts
-			detected = true
 		}
-		last = ts
+		if !detected || ts.After(last) {
+			last = ts
+		}
+		detected = true
 	}
-	// scanner.Err() (e.g. ErrTooLong on a pathological line) just means
-	// scanning stopped early — whatever was found before that point is
-	// still returned, consistent with this being a best-effort check.
 
-	truncated := scanHitCap(bounded, gz)
+	// Either way the scan stopped for our reasons rather than because the
+	// log ended, so everything past that point is unread. Reading the
+	// scanner error matters as much as the byte budget: a single
+	// over-long line (a panic dump, a large embedded payload) hits
+	// bufio.ErrTooLong with budget to spare, and treating that as a
+	// complete scan would let our own buffer limit be reported as the
+	// validator's logs falling short of the window.
+	truncated := scanner.Err() != nil || scanHitCap(bounded, gz)
 
 	if !detected {
 		return LogWindowCheck{Truncated: truncated}
 	}
 
-	// A real validator log easily exceeds maxLogScanBytes decompressed,
-	// and the cap is ours, not the submitter's fault: when it is what
-	// ended the scan, `last` is simply the last timestamp we bothered to
-	// read and says nothing about whether the log runs to the end of the
-	// investigation window. Judge coverage on the start side only in that
-	// case — otherwise virtually every genuine submission would be marked
-	// as not covering the window and lose log-quality points for it.
-	covered := !first.After(cfg.InvestigationWindowStart)
-	if !truncated {
-		covered = covered && !last.Before(cfg.InvestigationWindowEnd)
-	}
+	// Coverage means verified coverage, on both sides. A truncated scan
+	// never reached the end of the log, so it cannot establish the end
+	// side — it yields partial credit via LogQualityScore and an
+	// explicitly informational note in the generated summary, rather than
+	// either full marks it didn't earn or a warning it didn't deserve.
+	covered := !first.After(cfg.InvestigationWindowStart) && !last.Before(cfg.InvestigationWindowEnd)
 	return LogWindowCheck{Detected: true, Covered: covered, Truncated: truncated, FirstSeen: first, LastSeen: last}
 }
 

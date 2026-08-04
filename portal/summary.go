@@ -60,17 +60,20 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 			if !result.VersionSupported {
 				b.WriteString("  - ⚠️ gnoland_version is not in the supported list\n")
 			}
+			// Exactly one line, because the truncated case is not a weaker
+			// version of the uncovered case: it is the absence of a verdict.
+			// Emitting both would state as fact that the validator's logs
+			// fall short of the window and then immediately admit we never
+			// looked. Informational, deliberately not a ⚠️ warning — the
+			// scan stopping early is a limit of this tool, not something
+			// the validator did wrong.
 			switch {
 			case !result.LogWindow.Detected:
 				b.WriteString("  - ⚠️ no recognizable timestamps found in gnoland.log.gz\n")
+			case result.LogWindow.Truncated:
+				b.WriteString("  - ℹ️ log coverage could not be fully verified: the scan stopped before the end of the log\n")
 			case !result.LogWindow.Covered:
 				b.WriteString("  - ⚠️ logs do not fully cover the investigation window\n")
-			}
-			// Informational, deliberately not a ⚠️ warning: hitting the
-			// scan's own size cap is a limit of this tool, not something
-			// the validator did wrong.
-			if result.LogWindow.Truncated {
-				b.WriteString("  - ℹ️ log coverage could not be fully verified: the scan stopped at its size cap\n")
 			}
 		}
 

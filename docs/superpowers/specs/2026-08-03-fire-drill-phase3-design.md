@@ -113,8 +113,17 @@ Pure logic, no HTTP:
   time), `LogQualityScore`, `Result.TotalScore()`.
 - `checks.go` — `AutoChecks(meta submission.Metadata, logGz []byte, cfg exercise.Config) (GenesisMatch, VersionSupported bool, LogWindow LogWindowCheck)`. Decompresses `logGz` under its own bounded reader (independent
   cap from archive-level validation — see Security section) and scans for a
-  recognizable timestamp prefix on each line, stopping once both the first
-  and last recognizable timestamps are found or the cap is hit.
+  recognizable timestamp prefix on each line, tracking the earliest and
+  latest seen, until the log ends or the cap is hit.
+
+  > **Corrected after implementation.** This originally said the scan
+  > "stops as soon as both a first and last recognizable timestamp are
+  > found". That is not implementable: the latest timestamp is only known
+  > once the stream has been read to the end, so there is nothing to stop
+  > early *on*. The cap is therefore what bounds the work, and it is set
+  > generously (1 GiB of plaintext) rather than tightly, because a scan
+  > that stops early cannot establish end-of-window coverage — see
+  > "Log quality" below.
 - `store.go` — `Store`: JSON file, mutex-guarded read-modify-write, keyed by
   `SubmissionID`. Same shape as `exercise.FileStore`.
 
@@ -206,6 +215,14 @@ structural guarantee), and up to 10 more come from `LogWindowCheck`:
 `Covered` → 10, `Detected && !Covered` (partial overlap with the
 investigation window) → 5, `!Detected` → 0 (surfaced as a warning in the
 summary, not a rejection — timestamp parsing is best-effort).
+
+`Covered` means *verified* coverage on both sides, which takes a scan that
+reached the end of the log. A scan that stopped at its own cap, or on an
+over-long line, therefore lands in the middle tier (5) and is reported in
+the summary as "could not be fully verified" — never as full marks it
+didn't earn, and never as the ⚠️ warning that the validator's logs fall
+short. Those are three distinct states and the summary emits exactly one
+line for whichever applies.
 
 **Genesis hash / gnoland version** — pass/fail checks, not part of the
 100-point score. `prd.md` lists them under Phase 3's "Automatic validation

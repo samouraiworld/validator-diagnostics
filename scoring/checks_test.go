@@ -77,7 +77,7 @@ func TestAutoChecks_LogWindowFullyCovered(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_LogWindowPartiallyCovered(t *testing.T) {
+func TestAutoChecks_LogWindowStartsAfterWindowOpened(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t,
 		"2026-07-08T19:00:00Z starting up",
@@ -89,63 +89,126 @@ func TestAutoChecks_LogWindowPartiallyCovered(t *testing.T) {
 		t.Error("window.Detected = false, want true")
 	}
 	if window.Covered {
-		t.Error("window.Covered = true, want false (log ends well before the investigation window does)")
+		t.Error("window.Covered = true, want false (the log begins after the investigation window opened)")
 	}
 }
 
-func TestAutoChecks_LogWindowTruncatedByScanCap(t *testing.T) {
-	// A log big enough that the 8 MiB decompression cap — not the log
-	// itself — ends the scan, with the timestamps that would prove
-	// end-of-window coverage sitting past the cap. Any real validator log
-	// looks like this, so truncation must not be read as the validator
-	// failing to cover the window.
+func TestAutoChecks_LogWindowEndsBeforeWindowClosed(t *testing.T) {
+	// The start side is fine and only the end side fails. Without this
+	// case the end-side half of the coverage check is dead weight: a
+	// start-side-only implementation passes every other test in the repo.
 	cfg := windowTestConfig()
-
-	lines := []string{"2026-07-08T17:00:00Z starting up"}
-	filler := "2026-07-08T17:00:01Z " + strings.Repeat("x", 200)
-	for len(lines)*len(filler) < maxLogScanBytes+(1<<20) {
-		lines = append(lines, filler)
-	}
-	lines = append(lines, "2026-07-09T19:00:00Z shutting down") // past the cap, never read
-	logGz := gzipLines(t, lines...)
+	logGz := gzipLines(t,
+		"2026-07-08T17:00:00Z starting up before the window opened",
+		"2026-07-09T10:00:00Z stopped well before the window closed",
+	)
 
 	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	if !window.Detected {
+		t.Error("window.Detected = false, want true")
+	}
+	if window.Covered {
+		t.Error("window.Covered = true, want false (the log ends before the investigation window closed)")
+	}
+}
+
+func TestScanLogWindow_TruncatedIsNotTreatedAsCovered(t *testing.T) {
+	// A log whose real timestamps span one second, padded past the scan
+	// budget. It says nothing about covering a 24-hour window, so it must
+	// not score as if it did: an unverified tail is not a verified one.
+	cfg := windowTestConfig()
+
+	const budget = 64 << 10
+	lines := []string{"2026-07-08T17:00:00Z starting up"}
+	filler := "2026-07-08T17:00:01Z " + strings.Repeat("x", 200)
+	for len(lines)*len(filler) < budget*2 {
+		lines = append(lines, filler)
+	}
+	lines = append(lines, "2026-07-09T19:00:00Z shutting down") // past the budget, never read
+	logGz := gzipLines(t, lines...)
+
+	window := scanLogWindow(logGz, cfg, budget)
 	if !window.Truncated {
-		t.Fatalf("window = %+v, want Truncated (the scan cap, not the log, ended the scan)", window)
+		t.Fatalf("window = %+v, want Truncated (the budget, not the log, ended the scan)", window)
 	}
 	if !window.Detected {
 		t.Error("window.Detected = false, want true")
 	}
-	if !window.Covered {
-		t.Error("window.Covered = false, want true: the log starts before the window and the tail was never scanned")
+	if window.Covered {
+		t.Error("window.Covered = true, want false: the tail was never read, so coverage was never verified")
 	}
-	if got := LogQualityScore(window); got != 20 {
-		t.Errorf("LogQualityScore = %d, want 20 (truncation must not cost points)", got)
-	}
-	if !window.LastSeen.Before(time.Date(2026, 7, 9, 19, 0, 0, 0, time.UTC)) {
-		t.Errorf("LastSeen = %v, want a timestamp from within the cap — the tail should never have been read", window.LastSeen)
+	if got := LogQualityScore(window); got != 15 {
+		t.Errorf("LogQualityScore = %d, want 15 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
 	}
 }
 
-func TestAutoChecks_LogWindowTruncatedButStartsTooLate(t *testing.T) {
-	// Truncation excuses an unseen tail, not a log that demonstrably
-	// begins after the investigation window opened — that start-side gap
-	// is visible within the cap and stays a genuine coverage failure.
+func TestScanLogWindow_OverlongLineMarksTruncated(t *testing.T) {
+	// bufio.Scanner gives up on a line past its buffer cap. That ends the
+	// scan for our reasons, not the submitter's, so it has to raise the
+	// same "unverified" signal the byte budget does — otherwise the
+	// generated summary states as fact that a validator's logs miss the
+	// window, when all that happened is our buffer overflowed.
 	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		"2026-07-08T17:00:00Z starting up before the window opened",
+		strings.Repeat("x", maxLogLineBytes+1), // e.g. a panic dump
+		"2026-07-09T19:00:00Z ran past the end of the window",
+	)
 
-	lines := []string{"2026-07-09T10:00:00Z starting up well after the window opened"}
-	filler := "2026-07-09T10:00:01Z " + strings.Repeat("x", 200)
-	for len(lines)*len(filler) < maxLogScanBytes+(1<<20) {
-		lines = append(lines, filler)
-	}
-	logGz := gzipLines(t, lines...)
-
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := scanLogWindow(logGz, cfg, maxLogScanBytes)
 	if !window.Truncated {
-		t.Fatalf("window = %+v, want Truncated", window)
+		t.Fatalf("window = %+v, want Truncated (an over-long line ended the scan early)", window)
 	}
 	if window.Covered {
-		t.Error("window.Covered = true, want false (the log starts after the investigation window did)")
+		t.Error("window.Covered = true, want false: the scan never reached the closing timestamp")
+	}
+}
+
+func TestScanLogWindow_UsesEarliestAndLatestTimestamps(t *testing.T) {
+	// Rotated log files concatenated out of order, or interleaved
+	// goroutine output, break the assumption that the first line carries
+	// the earliest timestamp and the last line the latest.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		"2026-07-09T19:00:00Z this line is last chronologically but comes first",
+		"2026-07-08T17:00:00Z and this one is earliest but comes last",
+	)
+
+	window := scanLogWindow(logGz, cfg, maxLogScanBytes)
+	if want := time.Date(2026, 7, 8, 17, 0, 0, 0, time.UTC); !window.FirstSeen.Equal(want) {
+		t.Errorf("FirstSeen = %v, want %v (the earliest timestamp, not the first line)", window.FirstSeen, want)
+	}
+	if want := time.Date(2026, 7, 9, 19, 0, 0, 0, time.UTC); !window.LastSeen.Equal(want) {
+		t.Errorf("LastSeen = %v, want %v (the latest timestamp, not the last line)", window.LastSeen, want)
+	}
+	if !window.Covered {
+		t.Error("window.Covered = false, want true: the timestamps present do span the window")
+	}
+}
+
+func TestScanLogWindow_BudgetBoundsDecompression(t *testing.T) {
+	// The bomb defence: gnoland.log.gz's content is itself compressed
+	// plaintext that ValidateArchive never decompresses, so this is the
+	// first place decompression happens and the budget is what keeps a
+	// small upload from expanding without limit.
+	cfg := windowTestConfig()
+
+	const budget = 64 << 10
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	line := []byte("2026-07-08T17:00:00Z " + strings.Repeat("x", 200) + "\n")
+	for i := 0; i < 100*budget/len(line); i++ {
+		if _, err := gw.Write(line); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	window := scanLogWindow(buf.Bytes(), cfg, budget)
+	if !window.Truncated {
+		t.Errorf("window = %+v, want Truncated: the scan must stop at its budget rather than decompress the whole stream", window)
 	}
 }
 
