@@ -26,6 +26,9 @@ const defaultTimeout = 30 * time.Second
 // channel as a real detection but means the opposite — see Scan.
 const limitsExceededPrefix = "Heuristics.Limits.Exceeded"
 
+// streamPrefix is what clamd prefixes every INSTREAM verdict line with.
+const streamPrefix = "stream:"
+
 // ClamdScanner scans over clamd's INSTREAM protocol: a stream of
 // 4-byte-big-endian-length-prefixed chunks terminated by a
 // zero-length chunk, answered with a single response line
@@ -124,6 +127,16 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 	}
 	line = strings.TrimSpace(line)
 
+	// Everything below matches on the OK/FOUND suffix, so the "stream:"
+	// prefix has to be checked first: without it any stray line ending in
+	// OK — a banner, a reply left over from another command — would read
+	// as a clean verdict. Unrecognized input falls through to the default
+	// error, which is the only safe reading of a response we can't parse.
+	// ERROR lines are exempt: clamd emits those without the prefix.
+	if !strings.HasPrefix(line, streamPrefix) && !strings.HasSuffix(line, "ERROR") {
+		return Verdict{}, fmt.Errorf("clamav: unrecognized response %q", line)
+	}
+
 	switch {
 	case strings.HasSuffix(line, "ERROR"):
 		// clamd reporting a problem with the request itself rather than a
@@ -132,10 +145,10 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 		// but named distinctly so an operator can tell a misconfigured size
 		// limit from a daemon that is down or speaking gibberish.
 		return Verdict{}, fmt.Errorf("clamav: clamd protocol error: %s", line)
-	case strings.HasSuffix(line, "OK"):
+	case line == streamPrefix+" OK":
 		return Verdict{}, nil
 	case strings.HasSuffix(line, "FOUND"):
-		rest := strings.TrimSuffix(strings.TrimPrefix(line, "stream:"), "FOUND")
+		rest := strings.TrimSuffix(strings.TrimPrefix(line, streamPrefix), "FOUND")
 		signature := strings.TrimSpace(rest)
 		// With AlertExceedsMax enabled, clamd reuses the FOUND channel to
 		// report content it declined to scan because a size/recursion

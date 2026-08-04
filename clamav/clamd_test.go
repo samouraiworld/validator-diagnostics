@@ -126,6 +126,32 @@ func TestClamdScanner_Infected(t *testing.T) {
 	}
 }
 
+func TestClamdScanner_RequiresStreamPrefix(t *testing.T) {
+	// INSTREAM answers "stream: ...". Matching on the OK/FOUND suffix
+	// alone means any stray line that happens to end in OK — a banner, a
+	// reply left over from another command — becomes a clean verdict. In
+	// a file whose whole purpose is to never confuse "clean" with "we
+	// don't know", an unrecognized line has to be an error.
+	for _, response := range []string{
+		"Bogus daemon banner OK\n",
+		"SOMETHINGELSE: OK\n",
+		"OK\n",
+	} {
+		t.Run(strings.TrimSpace(response), func(t *testing.T) {
+			addr := fakeClamd(t, response)
+			scanner := ClamdScanner{Addr: addr, Timeout: 5 * time.Second}
+
+			verdict, err := scanner.Scan(context.Background(), strings.NewReader("payload"))
+			if err == nil {
+				t.Fatalf("Scan returned verdict %+v and no error, want an error for an unrecognized response", verdict)
+			}
+			if verdict.Infected {
+				t.Errorf("Infected = true, want the zero Verdict alongside the error")
+			}
+		})
+	}
+}
+
 func TestClamdScanner_LimitsExceededIsAnErrorNotAVerdict(t *testing.T) {
 	// With AlertExceedsMax on, clamd reports content it gave up scanning
 	// (MaxScanSize/MaxFileSize/MaxRecursion/MaxFiles) through the FOUND
