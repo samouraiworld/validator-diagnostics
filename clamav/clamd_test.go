@@ -126,6 +126,37 @@ func TestClamdScanner_Infected(t *testing.T) {
 	}
 }
 
+func TestClamdScanner_LimitsExceededIsAnErrorNotAVerdict(t *testing.T) {
+	// With AlertExceedsMax on, clamd reports content it gave up scanning
+	// (MaxScanSize/MaxFileSize/MaxRecursion/MaxFiles) through the FOUND
+	// channel, as a Heuristics.Limits.Exceeded pseudo-signature. That is
+	// the opposite of a detection: it means part of the archive was never
+	// examined. Reporting it as Infected would tell a validator their
+	// submission contains malware on the strength of a scan that did not
+	// happen — and the honest answer, "we could not complete the scan",
+	// is exactly what the error return means.
+	for _, response := range []string{
+		"stream: Heuristics.Limits.Exceeded.MaxFileSize FOUND\n",
+		"stream: Heuristics.Limits.Exceeded.MaxScanSize FOUND\n",
+	} {
+		t.Run(strings.TrimSpace(response), func(t *testing.T) {
+			addr := fakeClamd(t, response)
+			scanner := ClamdScanner{Addr: addr, Timeout: 5 * time.Second}
+
+			verdict, err := scanner.Scan(context.Background(), strings.NewReader("a very large archive"))
+			if err == nil {
+				t.Fatalf("Scan returned verdict %+v and no error, want an error: the scan was incomplete, not clean and not infected", verdict)
+			}
+			if verdict.Infected {
+				t.Error("Infected = true, want false: an unscanned region is not a detection")
+			}
+			if !strings.Contains(err.Error(), "Heuristics.Limits.Exceeded") {
+				t.Errorf("error = %v, want it to name the limit clamd hit so an operator can raise it", err)
+			}
+		})
+	}
+}
+
 func TestClamdScanner_LargeInput(t *testing.T) {
 	// Exercises the multi-chunk path (chunkSize is 1 MiB): 3 MiB of
 	// input should be split across multiple INSTREAM chunks.

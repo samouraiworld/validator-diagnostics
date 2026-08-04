@@ -12,12 +12,19 @@ import (
 )
 
 // chunkSize is how much of the scanned input ClamdScanner buffers per
-// INSTREAM chunk. clamd's own default StreamMaxLength is 25 MiB per
-// chunk; staying well below that keeps memory use predictable
-// regardless of what a given deployment configures.
+// INSTREAM chunk. It is a memory-use choice only: clamd's
+// StreamMaxLength bounds the whole stream, not each chunk, so this can
+// be tuned freely without reference to the daemon's configuration.
 const chunkSize = 1 << 20 // 1 MiB
 
 const defaultTimeout = 30 * time.Second
+
+// limitsExceededPrefix is the pseudo-signature family clamd reports,
+// when AlertExceedsMax is enabled, for content it stopped scanning
+// because a size or recursion limit was reached (MaxFileSize,
+// MaxScanSize, MaxRecursion, MaxFiles). It arrives over the same FOUND
+// channel as a real detection but means the opposite — see Scan.
+const limitsExceededPrefix = "Heuristics.Limits.Exceeded"
 
 // ClamdScanner scans over clamd's INSTREAM protocol: a stream of
 // 4-byte-big-endian-length-prefixed chunks terminated by a
@@ -129,7 +136,21 @@ func (c ClamdScanner) Scan(ctx context.Context, r io.Reader) (Verdict, error) {
 		return Verdict{}, nil
 	case strings.HasSuffix(line, "FOUND"):
 		rest := strings.TrimSuffix(strings.TrimPrefix(line, "stream:"), "FOUND")
-		return Verdict{Infected: true, Signature: strings.TrimSpace(rest)}, nil
+		signature := strings.TrimSpace(rest)
+		// With AlertExceedsMax enabled, clamd reuses the FOUND channel to
+		// report content it declined to scan because a size/recursion
+		// limit was hit. That is the inverse of a detection — part of the
+		// archive was never examined — so it must not surface as Infected.
+		// An incomplete scan is precisely what a non-nil error means here,
+		// and it keeps the caller fail-closed instead of accusing a
+		// validator of shipping malware on the strength of a scan that
+		// never ran. (Without AlertExceedsMax, clamd answers "OK" in this
+		// case, which is the fail-open this exists to prevent — see
+		// clamd.conf.)
+		if strings.HasPrefix(signature, limitsExceededPrefix) {
+			return Verdict{}, fmt.Errorf("clamav: scan incomplete, clamd hit a scanning limit: %s", signature)
+		}
+		return Verdict{Infected: true, Signature: signature}, nil
 	default:
 		return Verdict{}, fmt.Errorf("clamav: unrecognized response %q", line)
 	}
