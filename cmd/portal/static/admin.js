@@ -1,9 +1,12 @@
 "use strict";
 
-function badge(ok, okText, warnText) {
+// state is "ok", "caution", or "warn". Caution exists because some
+// checks have a real middle outcome — a log the scan could only
+// partially verify is not the same as one that failed.
+function badge(state, text) {
   const span = document.createElement("span");
-  span.className = "badge " + (ok ? "badge-ok" : "badge-warn");
-  span.textContent = ok ? okText : warnText;
+  span.className = "badge badge-" + state;
+  span.textContent = text;
   return span;
 }
 
@@ -132,10 +135,26 @@ async function refresh({ force = false } = {}) {
 
     const checksCell = document.createElement("td");
     if (s.score && s.score.scored) {
+      const w = s.score.log_window;
+      let logState = "warn";
+      let logText = "logs ✗";
+      if (w.covered) {
+        logState = "ok";
+        logText = "logs ✓";
+      } else if (w.truncated) {
+        // Our scan stopped early, so coverage is unknown rather than
+        // missing — don't render it as the validator's failure.
+        logState = "caution";
+        logText = "logs unverified";
+      } else if (w.detected) {
+        logState = "caution";
+        logText = "logs partial";
+      }
+
       checksCell.append(
-        badge(s.score.genesis_match, "genesis ✓", "genesis ✗"),
-        badge(s.score.version_supported, "version ✓", "version ✗"),
-        badge(s.score.log_window.covered, "logs ✓", s.score.log_window.detected ? "logs partial" : "logs ✗"),
+        badge(s.score.genesis_match ? "ok" : "warn", s.score.genesis_match ? "genesis ✓" : "genesis ✗"),
+        badge(s.score.version_supported ? "ok" : "warn", s.score.version_supported ? "version ✓" : "version ✗"),
+        badge(logState, logText),
       );
     }
     row.appendChild(checksCell);

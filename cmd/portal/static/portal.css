@@ -35,6 +35,9 @@
   --red-400: #eb6c49;
   --red-600: #a8402a;
 
+  --amber-400: #cf9b3c;
+  --amber-600: #8a5e15;
+
   --fg: var(--gray-800);
   --bg: #ffffff;
   --border: var(--gray-100);
@@ -47,6 +50,7 @@
 
   --error: var(--red-600);
   --success: var(--green-600);
+  --caution: var(--amber-600);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -63,6 +67,7 @@
 
     --error: var(--red-400);
     --success: var(--green-400);
+    --caution: var(--amber-400);
   }
 }
 
@@ -270,6 +275,13 @@ details.archive-help ul {
 
 .badge-warn {
   background: var(--error);
+  color: var(--brand-contrast);
+}
+
+/* Partial log coverage is a middle state, not a failure — sharing
+   badge-warn's red said the submission failed a check it didn't. */
+.badge-caution {
+  background: var(--caution);
   color: var(--brand-contrast);
 }
 
