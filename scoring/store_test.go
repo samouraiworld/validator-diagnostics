@@ -81,8 +81,8 @@ func TestStore_SetUpdatesInPlace(t *testing.T) {
 		t.Fatalf("Set(first): %v", err)
 	}
 
-	ack := 10
-	if err := store.Set(Result{SubmissionID: "abc", UploadTimeScore: 20, AckTimeScore: &ack}); err != nil {
+	irq := 10
+	if err := store.Set(Result{SubmissionID: "abc", UploadTimeScore: 20, IncidentResponseQualityScore: &irq}); err != nil {
 		t.Fatalf("Set(second): %v", err)
 	}
 
@@ -90,8 +90,8 @@ func TestStore_SetUpdatesInPlace(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
-	if got.AckTimeScore == nil || *got.AckTimeScore != 10 {
-		t.Errorf("AckTimeScore = %v, want a pointer to 10", got.AckTimeScore)
+	if got.IncidentResponseQualityScore == nil || *got.IncidentResponseQualityScore != 10 {
+		t.Errorf("IncidentResponseQualityScore = %v, want a pointer to 10", got.IncidentResponseQualityScore)
 	}
 }
 

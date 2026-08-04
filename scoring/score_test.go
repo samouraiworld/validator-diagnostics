@@ -24,8 +24,8 @@ func TestTieredTimeScore(t *testing.T) {
 	}{
 		{"at announcement", cfg.AnnouncedAt, 25},
 		// Not 25: an event predating the exercise hasn't happened yet as
-		// far as the rubric goes. AckTimeScore is admin-typed, so a
-		// mistyped year would otherwise silently earn full marks.
+		// far as the rubric goes. Unreachable in practice since t is the
+		// server clock, but guarded anyway — see TieredTimeScore.
 		{"before announcement", cfg.AnnouncedAt.Add(-time.Minute), 0},
 		{"exactly 25%", cfg.AnnouncedAt.Add(1 * time.Hour), 25},
 		{"just past 25%", cfg.AnnouncedAt.Add(1*time.Hour + time.Second), 19},
