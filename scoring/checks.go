@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"strings"
 	"time"
@@ -146,19 +147,53 @@ func scanHitCap(bounded *io.LimitedReader, gz io.Reader) bool {
 // first whitespace-delimited token of line — splitting on whitespace
 // first (rather than taking a fixed-length prefix) is what lets this
 // correctly handle layouts like RFC3339 whose rendered width varies
-// (e.g. "Z" vs "+02:00").
+// (e.g. "Z" vs "+02:00"). Falls back to parseJSONTimestamp for
+// gnoland's actual logger output, which is a JSON object rather than a
+// leading plain-text timestamp.
 func parseLeadingTimestamp(line string) (time.Time, bool) {
 	field := line
 	if i := strings.IndexAny(line, " \t"); i >= 0 {
 		field = line[:i]
 	}
-	if len(field) == 0 || len(field) > 64 {
-		return time.Time{}, false
-	}
-	for _, layout := range timestampLayouts {
-		if ts, err := time.Parse(layout, field); err == nil {
-			return ts, true
+	if len(field) > 0 && len(field) <= 64 {
+		for _, layout := range timestampLayouts {
+			if ts, err := time.Parse(layout, field); err == nil {
+				return ts, true
+			}
 		}
 	}
-	return time.Time{}, false
+	return parseJSONTimestamp(line)
+}
+
+// jsonLogLine is the subset of gnoland's (cometbft/tendermint-style)
+// structured log line this cares about: a top-level "ts" field holding
+// a Unix epoch, seconds as a JSON number — usually with a fractional
+// part for sub-second precision, but not always, so this must accept
+// both "1783530000.5" and "1783530000".
+type jsonLogLine struct {
+	Ts json.Number `json:"ts"`
+}
+
+// parseJSONTimestamp decodes line as a single JSON object and reads its
+// "ts" field, best-effort like parseLeadingTimestamp's caller expects:
+// a line that isn't JSON, or has no numeric "ts", simply isn't a
+// timestamp rather than an error.
+func parseJSONTimestamp(line string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "{") {
+		return time.Time{}, false
+	}
+
+	var v jsonLogLine
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil || v.Ts == "" {
+		return time.Time{}, false
+	}
+	epoch, err := v.Ts.Float64()
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	sec := int64(epoch)
+	nsec := int64((epoch - float64(sec)) * float64(time.Second))
+	return time.Unix(sec, nsec).UTC(), true
 }

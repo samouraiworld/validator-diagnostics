@@ -93,18 +93,12 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 }
 
 // pendingNote qualifies a total that isn't final yet. This text gets
-// pasted into Discord, so a submission still missing its two manually
-// entered criteria must not read as a finished "60/100" — it is 60 out
-// of the points awarded so far.
+// pasted into Discord, so a submission still missing its manually
+// entered criterion must not read as a finished "75/100" — it is 75
+// out of the points awarded so far.
 func pendingNote(r scoring.Result) string {
-	switch {
-	case r.AckTimeScore == nil && r.IncidentResponseQualityScore == nil:
-		return " (ack + incident response pending)"
-	case r.AckTimeScore == nil:
-		return " (ack time pending)"
-	case r.IncidentResponseQualityScore == nil:
+	if r.IncidentResponseQualityScore == nil {
 		return " (incident response pending)"
-	default:
-		return ""
 	}
+	return ""
 }

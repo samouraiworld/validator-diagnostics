@@ -6,9 +6,10 @@
 Phase 2 (artifact collection & submission) are implemented and tested. Phase 3
 ("Analysis & Scoring") is not: there is no automatic verification of genesis
 hash / gnoland version / log time window, no scoring against the PRD's
-5×20-point rubric, and no generated summary. Separately, `prd.md`'s Security
-Considerations section lists a ClamAV scan as a "not yet implemented" defense
-layer.
+5×20-point rubric (later rescaled to 4×25 — see
+`2026-08-04-merge-ack-upload-scoring-design.md`), and no generated summary.
+Separately, `prd.md`'s Security Considerations section lists a ClamAV scan as
+a "not yet implemented" defense layer.
 
 This spec covers both: closing the Phase 3 gap, and adding the ClamAV scan,
 since the ClamAV scan sits directly in the same submission path this work
@@ -57,14 +58,12 @@ type Result struct {
     GenesisMatch     bool
     VersionSupported bool
     LogWindow        LogWindowCheck
-    UploadTimeScore  int // 0-20
-    MetadataScore    int // 0-20, effectively always 20 for a logged submission — see Scoring formulas
-    LogQualityScore  int // 0-20
+    UploadTimeScore  int // 0-25
+    MetadataScore    int // 0-25, effectively always 25 for a logged submission — see Scoring formulas
+    LogQualityScore  int // 0-25
 
     // Manual — entered later via POST /admin/submissions/{id}/score.
-    AcknowledgedAt               *time.Time
-    AckTimeScore                 *int
-    IncidentResponseQualityScore *int
+    IncidentResponseQualityScore *int // 0-25
 }
 
 type LogWindowCheck struct {
@@ -74,9 +73,9 @@ type LogWindowCheck struct {
 }
 ```
 
-`Result.TotalScore()` sums all five sub-scores, treating unset manual fields
-as "pending" (surfaced distinctly in the dashboard/summary, not silently
-counted as 0).
+`Result.TotalScore()` sums all four sub-scores, treating an unset manual
+field as "pending" (surfaced distinctly in the dashboard/summary, not
+silently counted as 0).
 
 ### `Entry` (`portal/log.go`)
 
@@ -109,8 +108,8 @@ matters).
 
 Pure logic, no HTTP:
 
-- `score.go` — the tiered time-based formula (shared by upload time and ack
-  time), `LogQualityScore`, `Result.TotalScore()`.
+- `score.go` — the tiered time-based formula (upload completion time),
+  `LogQualityScore`, `Result.TotalScore()`.
 - `checks.go` — `AutoChecks(meta submission.Metadata, logGz []byte, cfg exercise.Config) (GenesisMatch, VersionSupported bool, LogWindow LogWindowCheck)`. Decompresses `logGz` under its own bounded reader (independent
   cap from archive-level validation — see Security section) and scans for a
   recognizable timestamp prefix on each line, tracking the earliest and
@@ -157,11 +156,9 @@ Pure logic, no HTTP:
      marker instead of zeros.
   After a successful `Store.Save`, both `Log.Record` (existing) and the new
   `scoring.Store` write happen.
-- `score.go` (new) — `AdminScoreHandler`: `POST /admin/submissions/{id}/score`, body `{acknowledged_at: RFC3339, incident_response_quality_score: int}`. Validates the score is 0-20 (400 otherwise), looks up the
-  submission's `Entry` to compute `AckTimeScore` against the exercise's
-  announce/deadline window, and updates the `scoring.Result`. 404 on an
-  unknown ID; 400 if the exercise isn't configured yet (nothing to score
-  against).
+- `score.go` (new) — `AdminScoreHandler`: `POST /admin/submissions/{id}/score`, body `{incident_response_quality_score: int}`. Validates the score is
+  0-25 (400 otherwise) and updates the `scoring.Result`. 404 on an unknown
+  ID; 409 if the submission was never auto-scored (nothing to complete).
 - `admin.go` — `AdminSubmissionsHandler` extended to join each `Entry` with
   its `scoring.Result` in the JSON response, so the dashboard has everything
   in one call.
@@ -189,36 +186,38 @@ Docker network as the portal. Portal's `CLAMAV_ADDR` env var points at
 
 ## Scoring formulas
 
-**Tiered time score** (shared by upload completion time and acknowledgement
-time), given `announced_at`, `deadline_at`, and the event timestamp `t`:
+**Tiered time score** (upload completion time only — see
+`2026-08-04-merge-ack-upload-scoring-design.md` for why acknowledgement
+time was dropped), given `announced_at`, `deadline_at`, and the event
+timestamp `t`:
 
 ```
 pct = (t - announced_at) / (deadline_at - announced_at)
-pct <= 25%  → 20
-pct <= 50%  → 15
-pct <= 75%  → 10
-pct <= 100% → 5
+pct <= 25%  → 25
+pct <= 50%  → 19
+pct <= 75%  → 13
+pct <= 100% → 6
 pct > 100%  → 0
 ```
 
-**Metadata completeness** — always 20 for a logged submission. `SubmitHandler` already rejects a submission with invalid `metadata.json` before
+**Metadata completeness** — always 25 for a logged submission. `SubmitHandler` already rejects a submission with invalid `metadata.json` before
 it's ever recorded (`submission.ValidateMetadata`), so by construction every
 `scoring.Result` that exists corresponds to metadata that passed the schema.
 The field is kept (rather than removed) for symmetry with the PRD's rubric
 and in case per-field partial credit is wanted later — but as designed here,
 it doesn't vary.
 
-**Log quality** (0-20) — for the same reason, "archive present with valid
+**Log quality** (0-25) — for the same reason, "archive present with valid
 gzip magic bytes" is also already guaranteed by `submission.ValidateArchive`
-before a submission is recorded. So: 10 points are a fixed base (that
-structural guarantee), and up to 10 more come from `LogWindowCheck`:
-`Covered` → 10, `Detected && !Covered` (partial overlap with the
-investigation window) → 5, `!Detected` → 0 (surfaced as a warning in the
+before a submission is recorded. So: 13 points are a fixed base (that
+structural guarantee), and up to 12 more come from `LogWindowCheck`:
+`Covered` → +12, `Detected && !Covered` (partial overlap with the
+investigation window) → +6, `!Detected` → +0 (surfaced as a warning in the
 summary, not a rejection — timestamp parsing is best-effort).
 
 `Covered` means *verified* coverage on both sides, which takes a scan that
 reached the end of the log. A scan that stopped at its own cap, or on an
-over-long line, therefore lands in the middle tier (5) and is reported in
+over-long line, therefore lands in the middle tier (6) and is reported in
 the summary as "could not be fully verified" — never as full marks it
 didn't earn, and never as the ⚠️ warning that the validator's logs fall
 short. Those are three distinct states and the summary emits exactly one
@@ -276,8 +275,8 @@ remains not implemented; this work doesn't add or remove that gap.
   investigation window, announce/deadline timestamps, observations).
 - The submissions table gains score columns and pass/fail badges (genesis
   match, version supported, log window coverage).
-- A per-row form for the two manual fields (acknowledged-at timestamp,
-  incident response quality score).
+- A per-row form for the one manual field (incident response quality
+  score).
 - A "Generate summary" view that displays the Markdown output of
   `GET /admin/summary` in a copyable text block.
 
@@ -285,8 +284,8 @@ remains not implemented; this work doesn't add or remove that gap.
 
 - `POST /admin/exercise`: 400 on `DeadlineAt <= AnnouncedAt` or
   `InvestigationWindowEnd <= InvestigationWindowStart`.
-- `POST /admin/submissions/{id}/score`: 400 on a score outside 0-20 or if no
-  exercise is configured yet; 404 on an unknown submission ID.
+- `POST /admin/submissions/{id}/score`: 400 on a score outside 0-25; 404 on
+  an unknown submission ID; 409 if the submission was never auto-scored.
 - AV scan: infected → 422; scanner unreachable/timeout → 503 (fail-closed).
 - Genesis/version/log-window mismatches never block an upload — informational only, consistent with `prd.md`'s split between Phase 2 (blocking,
   security/structure) and Phase 3 (informational, analysis).
@@ -300,7 +299,7 @@ remains not implemented; this work doesn't add or remove that gap.
 - `scoring`: tiered-formula boundary tests (exactly at 25/50/75/100%, before
   announcement, after deadline); timestamp parsing (mixed recognized/
   unrecognized lines, no timestamps at all, decompression cap reached);
-  genesis/version match and mismatch; `LogQualityScore` composite; `Result.TotalScore()` with pending manual fields.
+  genesis/version match and mismatch; `LogQualityScore` composite; `Result.TotalScore()` with a pending manual field.
 - `clamav`: a fake `INSTREAM` TCP server (same pattern as
   `storage/s3_test.go`'s fake S3-compatible server) exercising clean,
   infected, and malformed-response cases; a `NoopScanner` sanity test.

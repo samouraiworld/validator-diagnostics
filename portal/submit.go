@@ -213,12 +213,12 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				result.VersionSupported = versionSupported
 				result.LogWindow = window
 				result.UploadTimeScore = scoring.TieredTimeScore(recordedAt, cfg)
-				// Always 20: ValidateMetadata above already gated this
+				// Always 25: ValidateMetadata above already gated this
 				// submission on a schema-valid metadata.json, so by the
 				// time a Result exists at all, this criterion is
 				// structurally satisfied — see scoring.LogQualityScore's
 				// doc comment for the analogous reasoning on log quality.
-				result.MetadataScore = 20
+				result.MetadataScore = 25
 				result.LogQualityScore = scoring.LogQualityScore(window)
 			}
 			if h.Scores != nil {

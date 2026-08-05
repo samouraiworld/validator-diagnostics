@@ -575,11 +575,11 @@ func TestSubmitHandler_RecordsScoreWhenExerciseConfigured(t *testing.T) {
 	if !ok || !result.Scored {
 		t.Fatalf("result = %+v, ok=%v, want a Scored result", result, ok)
 	}
-	if result.MetadataScore != 20 {
-		t.Errorf("MetadataScore = %d, want 20", result.MetadataScore)
+	if result.MetadataScore != 25 {
+		t.Errorf("MetadataScore = %d, want 25", result.MetadataScore)
 	}
-	if result.UploadTimeScore != 20 {
-		t.Errorf("UploadTimeScore = %d, want 20 (submitted well within the first quarter)", result.UploadTimeScore)
+	if result.UploadTimeScore != 25 {
+		t.Errorf("UploadTimeScore = %d, want 25 (submitted well within the first quarter)", result.UploadTimeScore)
 	}
 }
 

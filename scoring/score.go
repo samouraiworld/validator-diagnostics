@@ -1,10 +1,10 @@
 // Package scoring implements prd.md's Phase 3 "Evaluation Criteria":
-// the 5x20-point rubric (acknowledgement time, upload completion time,
-// metadata completeness, log quality, incident response quality) and
-// the automatic checks (genesis hash, gnoland version, log time
-// window) that feed part of it. See
-// docs/superpowers/specs/2026-08-03-fire-drill-phase3-design.md for
-// the full design and the rationale behind each formula below.
+// the 4x25-point rubric (upload completion time, metadata completeness,
+// log quality, incident response quality) and the automatic checks
+// (genesis hash, gnoland version, log time window) that feed part of
+// it. See docs/superpowers/specs/2026-08-03-fire-drill-phase3-design.md
+// and docs/superpowers/specs/2026-08-04-merge-ack-upload-scoring-design.md
+// for the full design and the rationale behind each formula below.
 package scoring
 
 import (
@@ -13,9 +13,8 @@ import (
 	"github.com/samourai/validator-diagnostics/exercise"
 )
 
-// TieredTimeScore implements the tiered formula shared by upload
-// completion time and acknowledgement time: full marks for acting in
-// the first quarter of the announce-to-deadline window, degrading by
+// TieredTimeScore scores upload completion time: full marks for acting
+// in the first quarter of the announce-to-deadline window, degrading by
 // quarter, zero once past the deadline. A non-positive
 // (DeadlineAt - AnnouncedAt) — i.e. an unconfigured or invalid exercise
 // — always scores 0; callers are expected to check
@@ -29,25 +28,25 @@ func TieredTimeScore(t time.Time, cfg exercise.Config) int {
 	elapsed := t.Sub(cfg.AnnouncedAt)
 	// An event before the exercise was announced hasn't happened yet as
 	// far as the rubric is concerned. Without this, elapsed is negative
-	// and satisfies the first tier — full marks. That is unreachable for
-	// UploadTimeScore (server clock) but AckTimeScore is typed in by an
-	// admin, where a mistyped year is an ordinary slip.
+	// and satisfies the first tier — full marks. Unreachable in
+	// practice since t is always the server clock at upload time, but
+	// the guard costs nothing.
 	if elapsed < 0 {
 		return 0
 	}
 
 	switch {
 	case elapsed <= total/4:
-		return 20
+		return 25
 	case elapsed <= total/2:
-		return 15
+		return 19
 	// total/4*3, not total*3/4: the latter overflows time.Duration's
 	// int64 nanoseconds for a window past ~97 years and wraps negative,
 	// so the tier would never fire.
 	case elapsed <= total/4*3:
-		return 10
+		return 13
 	case elapsed <= total:
-		return 5
+		return 6
 	default:
 		return 0
 	}
@@ -90,12 +89,12 @@ type LogWindowCheck struct {
 // scored, see submission.ValidateArchive — with credit for how well
 // the detected log timestamps cover the investigation window.
 func LogQualityScore(window LogWindowCheck) int {
-	const structuralBase = 10
+	const structuralBase = 13
 	switch {
 	case window.Covered:
-		return structuralBase + 10
+		return structuralBase + 12
 	case window.Detected:
-		return structuralBase + 5
+		return structuralBase + 6
 	default:
 		return structuralBase
 	}
