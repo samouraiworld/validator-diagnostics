@@ -189,6 +189,33 @@ func TestValidateArchive_RejectsOversizedEntry(t *testing.T) {
 	}
 }
 
+func TestValidateArchive_RejectsOversizedLogEntry(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: LogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	_, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{MaxLogSize: 4})
+	if err == nil {
+		t.Fatal("expected an oversized gnoland.log.gz to be rejected, got nil")
+	}
+}
+
+func TestValidateArchive_AcceptsLogEntryExactlyAtMaxLogSize(t *testing.T) {
+	// Pins the exact-boundary semantics of the log path's bounded read: an
+	// entry of exactly MaxLogSize bytes is accepted, not rejected as
+	// oversized.
+	data := buildTarGz(t, []tarEntry{
+		{name: LogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	_, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{MaxLogSize: int64(len(validLogContent))})
+	if err != nil {
+		t.Fatalf("expected a log entry exactly at MaxLogSize to be accepted, got: %v", err)
+	}
+}
+
 func TestValidateArchive_RejectsBadLogMagicBytes(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
 		{name: LogFileName, content: []byte("not actually gzip")},
@@ -249,8 +276,9 @@ func TestOpenLog_BoundsTheStreamToMaxLogSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the log stream: %v", err)
 	}
-	if len(got) != 4 {
-		t.Errorf("read %d bytes, want the stream bounded to 4", len(got))
+	want := validLogContent[:4]
+	if !bytes.Equal(got, want) {
+		t.Errorf("stream = %q (len %d), want %q bounded to 4 bytes", got, len(got), want)
 	}
 }
 

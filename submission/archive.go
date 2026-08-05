@@ -45,9 +45,10 @@ func (o Options) withDefaults() Options {
 // *content* checks are different concerns with different failure modes.
 //
 // The gnoland.log.gz entry is deliberately not carried here. It is
-// validated in place and then dropped, so it is never resident for the
-// life of a request; callers that need to read it (see the scoring
-// package) stream it back out with OpenLog.
+// validated in place — magic bytes checked, the rest drained and counted
+// without ever being buffered — and then dropped, so memory for that
+// entry stays O(1) regardless of its size; callers that need its content
+// (see the scoring package) stream it back out with OpenLog.
 type Result struct {
 	Metadata []byte
 }
@@ -63,10 +64,16 @@ type Result struct {
 //   - Only regular files are accepted — symlinks, hardlinks,
 //     directories, and device entries are all rejected.
 //   - No duplicate entries.
-//   - Each entry is read through a bounded reader, so decompression
-//     cost/memory is capped by Options regardless of what the archive's
-//     headers or compression ratio claim (defends against zip/tar
-//     bombs without trusting declared sizes).
+//   - Each entry is read through a bounded reader, so decompression cost
+//     is capped by Options regardless of what the archive's headers or
+//     compression ratio claim (defends against zip/tar bombs without
+//     trusting declared sizes). For metadata.json that bound is on
+//     memory too — it's small (64 KiB) and genuinely needed by the
+//     caller, so it's read into memory whole. For gnoland.log.gz —
+//     potentially hundreds of MB — memory is O(1) regardless of
+//     MaxLogSize: it's drained and counted without ever being buffered,
+//     so the Options bound there caps decompression time, not resident
+//     memory.
 //
 // ValidateArchive never writes the archive anywhere; storing the
 // original raw bytes after successful validation is the caller's
@@ -110,29 +117,42 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 			return Result{}, fmt.Errorf("archive entry %q is not a regular file (tar type %q is not allowed)", hdr.Name, string(hdr.Typeflag))
 		}
 
-		limit := opts.MaxMetadataSize
-		if hdr.Name == LogFileName {
-			limit = opts.MaxLogSize
-		}
-
-		// Read up to limit+1 so a file that's exactly at the limit can
-		// be told apart from one that overflows it, without ever
-		// buffering more than limit+1 bytes no matter what hdr.Size or
-		// the compression ratio claims.
-		data, err := io.ReadAll(io.LimitReader(tr, limit+1))
-		if err != nil {
-			return Result{}, fmt.Errorf("reading archive entry %q: %w", hdr.Name, err)
-		}
-		if int64(len(data)) > limit {
-			return Result{}, fmt.Errorf("archive entry %q exceeds the %d byte limit", hdr.Name, limit)
-		}
-
 		switch hdr.Name {
 		case LogFileName:
-			if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+			// gnoland.log.gz can be hundreds of MB, so unlike
+			// metadata.json below it is never materialised: readBounded
+			// drains it through a bounded reader, counting bytes as it
+			// goes, and hands back only the first two (the gzip magic)
+			// that ever needed inspecting.
+			n, magic, err := readBounded(tr, opts.MaxLogSize)
+			if err != nil {
+				return Result{}, fmt.Errorf("reading archive entry %q: %w", hdr.Name, err)
+			}
+			if n > opts.MaxLogSize {
+				return Result{}, fmt.Errorf("archive entry %q exceeds the %d byte limit", hdr.Name, opts.MaxLogSize)
+			}
+			if n < 2 || magic[0] != 0x1f || magic[1] != 0x8b {
 				return Result{}, fmt.Errorf("%s does not look like a gzip file (bad magic bytes)", LogFileName)
 			}
+
 		case MetadataFileName:
+			// metadata.json is bounded to 64 KiB by default and its
+			// content is genuinely needed by the caller, so — unlike
+			// gnoland.log.gz above — it's fine, and simpler, to hold the
+			// whole thing in memory.
+			//
+			// Read up to limit+1 so a file that's exactly at the limit
+			// can be told apart from one that overflows it, without ever
+			// buffering more than limit+1 bytes no matter what hdr.Size
+			// or the compression ratio claims.
+			limit := opts.MaxMetadataSize
+			data, err := io.ReadAll(io.LimitReader(tr, limit+1))
+			if err != nil {
+				return Result{}, fmt.Errorf("reading archive entry %q: %w", hdr.Name, err)
+			}
+			if int64(len(data)) > limit {
+				return Result{}, fmt.Errorf("archive entry %q exceeds the %d byte limit", hdr.Name, limit)
+			}
 			metadata = data
 		}
 	}
@@ -203,3 +223,33 @@ type logStream struct {
 }
 
 func (s logStream) Close() error { return s.closer.Close() }
+
+// readBounded drains r — already positioned at the start of a tar entry —
+// without ever buffering it, and returns the total byte count read plus
+// the first two bytes seen (gnoland.log.gz's gzip magic; zero-valued if
+// fewer than two bytes were available).
+//
+// It reads up to limit+1 bytes total, the same "one past the limit" trick
+// ValidateArchive's metadata.json path uses via
+// io.ReadAll(io.LimitReader(...)): it lets the caller tell an entry sitting
+// exactly at limit apart from one that overflows it, without ever holding
+// more than two bytes in memory at once no matter what hdr.Size or the
+// compression ratio claims.
+func readBounded(r io.Reader, limit int64) (n int64, magic [2]byte, err error) {
+	lr := io.LimitReader(r, limit+1)
+
+	mn, err := io.ReadFull(lr, magic[:])
+	n = int64(mn)
+	if err != nil {
+		// Fewer than two bytes total isn't a read failure — it's an
+		// entry too short to have a valid gzip magic, which the caller
+		// checks for itself from n and magic.
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return n, magic, nil
+		}
+		return n, magic, err
+	}
+
+	rest, err := io.Copy(io.Discard, lr)
+	return n + rest, magic, err
+}
