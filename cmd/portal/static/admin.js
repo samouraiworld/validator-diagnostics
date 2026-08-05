@@ -1,5 +1,169 @@
 "use strict";
 
+let adminSessionToken = null;
+let adminCurrentNonce = null;
+let adminCurrentOperatorAddress = null;
+let refreshIntervalId = null;
+
+function setError(id, message) {
+  document.getElementById(id).textContent = message || "";
+}
+
+// The server always returns JSON, but a response from something else
+// entirely (a proxy's plain-text error page) might not be — .json()
+// throws on that, so every non-network-error response goes through
+// this instead of a bare `await resp.json()`.
+async function parseJSONResponse(resp) {
+  try {
+    return await resp.json();
+  } catch (err) {
+    return { error: `Unexpected response from server (status ${resp.status}).` };
+  }
+}
+
+// showLogin resets to the login screen, clearing any session in memory.
+// message, if given, explains why (e.g. an expired session) — left
+// blank on the very first page load.
+function showLogin(message) {
+  adminSessionToken = null;
+  // Stop the dashboard poll: left running, it would fire another
+  // unauthenticated refresh every 5s and re-run showLogin(), wiping the
+  // sign-in form out from under an admin part-way through signing a
+  // fresh challenge.
+  if (refreshIntervalId !== null) {
+    clearInterval(refreshIntervalId);
+    refreshIntervalId = null;
+  }
+  document.getElementById("admin-dashboard").hidden = true;
+  document.getElementById("admin-step-address").hidden = false;
+  document.getElementById("admin-step-sign").hidden = true;
+  setError("admin-address-error", message || "");
+}
+
+// adminFetch wraps fetch with the admin session's Authorization header,
+// and falls back to the login screen on 401/403 — an expired or
+// no-longer-whitelisted session should never leave the dashboard's
+// buttons failing silently against every subsequent click.
+async function adminFetch(url, options = {}) {
+  const headers = Object.assign({}, options.headers, {
+    Authorization: "Bearer " + adminSessionToken,
+  });
+  const resp = await fetch(url, Object.assign({}, options, { headers }));
+  if (resp.status === 401 || resp.status === 403) {
+    showLogin("Session expired or no longer authorized — please sign in again.");
+  }
+  return resp;
+}
+
+// startDashboard is called right after every successful admin
+// verification — including a re-login after a session expired or the
+// operator was dropped from the whitelist — so the initial refresh()
+// and loadExerciseConfig() always run again on re-entry rather than
+// leaving stale data on screen. refreshIntervalId tracks the periodic
+// poll below: showLogin() stops it on logout/expiry, and this restarts
+// it per login, so exactly one poll is live while the dashboard is up
+// and none while the sign-in screen is.
+function startDashboard() {
+  refresh();
+  loadExerciseConfig();
+  if (refreshIntervalId === null) {
+    refreshIntervalId = setInterval(() => refresh(), 5000);
+  }
+}
+
+document.getElementById("admin-get-challenge").addEventListener("click", async () => {
+  setError("admin-address-error", "");
+  const address = document.getElementById("admin-operator-address").value.trim();
+  if (!address) {
+    setError("admin-address-error", "Enter your operator address.");
+    return;
+  }
+
+  let resp;
+  try {
+    resp = await fetch("/auth/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_address: address }),
+    });
+  } catch (err) {
+    setError("admin-address-error", "Network error: " + err.message);
+    return;
+  }
+
+  const data = await parseJSONResponse(resp);
+  if (!resp.ok) {
+    setError("admin-address-error", data.error || "Unable to get a challenge.");
+    return;
+  }
+
+  adminCurrentNonce = data.nonce;
+  adminCurrentOperatorAddress = address;
+
+  const challengeJSON = JSON.stringify(data.challenge_tx, null, 2);
+  const blob = new Blob([challengeJSON], { type: "application/json" });
+  const link = document.getElementById("admin-download-challenge");
+  link.href = URL.createObjectURL(blob);
+
+  document.getElementById("admin-sign-command").textContent =
+    `gnokey sign --tx-path challenge.json \\\n` +
+    `  --chainid ${data.chainid} \\\n` +
+    `  --account-number ${data.account_number} --account-sequence ${data.account_sequence} \\\n` +
+    `  --output-document sig.json <your-operator-key-name>`;
+
+  document.getElementById("admin-step-sign").hidden = false;
+});
+
+document.getElementById("admin-verify-signature").addEventListener("click", async () => {
+  setError("admin-sign-error", "");
+  const fileInput = document.getElementById("admin-sig-file");
+  const file = fileInput.files[0];
+  if (!file) {
+    setError("admin-sign-error", "Choose the sig.json file produced by gnokey sign.");
+    return;
+  }
+
+  let sigDoc;
+  try {
+    sigDoc = JSON.parse(await file.text());
+  } catch (err) {
+    setError("admin-sign-error", "sig.json is not valid JSON: " + err.message);
+    return;
+  }
+  if (!sigDoc.signature) {
+    setError("admin-sign-error", 'sig.json has no "signature" field.');
+    return;
+  }
+
+  let resp;
+  try {
+    resp = await fetch("/auth/admin/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operator_address: adminCurrentOperatorAddress,
+        nonce: adminCurrentNonce,
+        signature: sigDoc.signature,
+      }),
+    });
+  } catch (err) {
+    setError("admin-sign-error", "Network error: " + err.message);
+    return;
+  }
+
+  const data = await parseJSONResponse(resp);
+  if (!resp.ok || !data.ok) {
+    setError("admin-sign-error", data.error || "Verification failed.");
+    return;
+  }
+
+  adminSessionToken = data.session_token;
+  document.getElementById("admin-step-address").hidden = true;
+  document.getElementById("admin-step-sign").hidden = true;
+  document.getElementById("admin-dashboard").hidden = false;
+  startDashboard();
+});
+
 // state is "ok", "caution", or "warn". Caution exists because some
 // checks have a real middle outcome — a log the scan could only
 // partially verify is not the same as one that failed.
@@ -76,7 +240,7 @@ function buildScoreForm(id, score) {
 
     let resp;
     try {
-      resp = await fetch(`/admin/submissions/${encodeURIComponent(id)}/score`, {
+      resp = await adminFetch(`/admin/submissions/${encodeURIComponent(id)}/score`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -124,7 +288,7 @@ async function refresh({ force = false } = {}) {
 
   let resp;
   try {
-    resp = await fetch("/admin/submissions");
+    resp = await adminFetch("/admin/submissions");
   } catch (err) {
     document.getElementById("admin-error").textContent = "Network error: " + err.message;
     return;
@@ -223,13 +387,10 @@ async function refresh({ force = false } = {}) {
   }
 }
 
-refresh();
-setInterval(() => refresh(), 5000);
-
 async function loadExerciseConfig() {
   let resp;
   try {
-    resp = await fetch("/admin/exercise");
+    resp = await adminFetch("/admin/exercise");
   } catch (err) {
     document.getElementById("exercise-error").textContent = "Network error: " + err.message;
     return;
@@ -278,7 +439,7 @@ document.getElementById("save-exercise").addEventListener("click", async () => {
 
   let resp;
   try {
-    resp = await fetch("/admin/exercise", {
+    resp = await adminFetch("/admin/exercise", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -296,8 +457,6 @@ document.getElementById("save-exercise").addEventListener("click", async () => {
 
   document.getElementById("exercise-saved").hidden = false;
 });
-
-loadExerciseConfig();
 
 // Tabs: aria-selected/hidden drive the visuals, the URL hash makes each
 // tab linkable/bookmarkable (e.g. sharing a link straight to Validators).
@@ -341,7 +500,7 @@ document.getElementById("generate-summary").addEventListener("click", async () =
   const output = document.getElementById("summary-output");
   let resp;
   try {
-    resp = await fetch("/admin/summary");
+    resp = await adminFetch("/admin/summary");
   } catch (err) {
     document.getElementById("admin-error").textContent = "Network error: " + err.message;
     return;
@@ -381,7 +540,7 @@ deleteConfirmButton.addEventListener("click", async () => {
 
   let resp;
   try {
-    resp = await fetch(`/admin/submissions/${encodeURIComponent(id)}`, { method: "DELETE" });
+    resp = await adminFetch(`/admin/submissions/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (err) {
     deleteDialog.close();
     document.getElementById("admin-error").textContent = "Network error: " + err.message;

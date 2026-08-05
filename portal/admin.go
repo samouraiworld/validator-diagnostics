@@ -1,24 +1,30 @@
 package portal
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
 
+	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/scoring"
 )
 
-// AdminAuth wraps next with HTTP Basic Auth, checking only the password
-// (any username is accepted) against a single admin password. The
-// comparison is constant-time to avoid a timing side-channel on the
-// password check.
-func AdminAuth(password string, next http.Handler) http.Handler {
+// RequireAdminSession wraps next, accepting only requests bearing a
+// valid admin session token (see auth.RequireSession) whose bound
+// operator address is present in allowlist. allowlist keys are bech32
+// address strings (crypto.Address.String()) — the same identity/session
+// machinery the validator upload flow uses, restricted to a fixed set
+// of admin addresses.
+func RequireAdminSession(sessions *auth.SessionSigner, allowlist map[string]bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, pass, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="validator-fire-drill-admin"`)
+		addr, err := auth.RequireSession(sessions, r)
+		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !allowlist[addr.String()] {
+			log.Printf("admin: rejected non-whitelisted operator address %s", addr)
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -43,7 +49,7 @@ type AdminSubmission struct {
 }
 
 // AdminSubmissionsHandler serves the recorded submissions, joined with
-// their scoring records, as a JSON array. Wrap it with AdminAuth.
+// their scoring records, as a JSON array. Wrap it with RequireAdminSession.
 func AdminSubmissionsHandler(submissionLog *FileLog, scores *scoring.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
