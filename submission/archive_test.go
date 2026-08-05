@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"io"
 	"testing"
 )
 
@@ -208,6 +209,73 @@ func TestValidateArchive_RejectsBadLogMagicBytes(t *testing.T) {
 func TestValidateArchive_RejectsNonGzipInput(t *testing.T) {
 	_, err := ValidateArchive(context.Background(), bytes.NewReader([]byte("this is not gzip at all")), Options{})
 	if err == nil {
+		t.Fatal("expected non-gzip input to be rejected, got nil")
+	}
+}
+
+func TestOpenLog_StreamsTheLogEntry(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: LogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	rc, err := OpenLog(context.Background(), bytes.NewReader(data), Options{})
+	if err != nil {
+		t.Fatalf("OpenLog: unexpected error: %v", err)
+	}
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("reading the log stream: %v", err)
+	}
+	if !bytes.Equal(got, validLogContent) {
+		t.Errorf("stream = %q, want %q", got, validLogContent)
+	}
+}
+
+func TestOpenLog_BoundsTheStreamToMaxLogSize(t *testing.T) {
+	// Defence in depth, not the primary gate: ValidateArchive has already
+	// rejected an oversized entry by the time OpenLog runs. This asserts
+	// the returned stream stops on its own rather than trusting that
+	// earlier pass, so a caller that skips validation still can't read
+	// unbounded bytes.
+	data := buildTarGz(t, []tarEntry{
+		{name: LogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	rc, err := OpenLog(context.Background(), bytes.NewReader(data), Options{MaxLogSize: 4})
+	if err != nil {
+		t.Fatalf("OpenLog: unexpected error: %v", err)
+	}
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("reading the log stream: %v", err)
+	}
+	if len(got) != 4 {
+		t.Errorf("read %d bytes, want the stream bounded to 4", len(got))
+	}
+}
+
+func TestOpenLog_ErrorsWhenLogEntryMissing(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	rc, err := OpenLog(context.Background(), bytes.NewReader(data), Options{})
+	if err == nil {
+		rc.Close()
+		t.Fatal("expected an error for an archive with no gnoland.log.gz, got nil")
+	}
+}
+
+func TestOpenLog_ErrorsOnNonGzipInput(t *testing.T) {
+	rc, err := OpenLog(context.Background(), bytes.NewReader([]byte("not gzip at all")), Options{})
+	if err == nil {
+		rc.Close()
 		t.Fatal("expected non-gzip input to be rejected, got nil")
 	}
 }

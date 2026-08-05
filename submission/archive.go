@@ -148,3 +148,61 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 
 	return Result{Metadata: metadata, LogGz: logGz}, nil
 }
+
+// OpenLog walks r — which must be a rewound reader over an archive
+// ValidateArchive has already accepted — and returns a reader over the
+// gnoland.log.gz entry, bounded to opts.MaxLogSize. The bytes are never
+// buffered: callers stream them, so an archive at the size limit costs
+// decompression time rather than that much resident memory.
+//
+// The returned ReadCloser owns the underlying gzip reader, so callers must
+// Close it. The stream is only valid until then, and reading it consumes r.
+//
+// OpenLog deliberately does not re-run ValidateArchive's structural checks
+// (allowed names, duplicates, file types, required entries) — those are
+// that function's job and are not duplicated here. The MaxLogSize bound is
+// kept as defence in depth against a caller that skipped validation, not
+// because a validated archive could exceed it.
+func OpenLog(ctx context.Context, r io.Reader, opts Options) (io.ReadCloser, error) {
+	opts = opts.withDefaults()
+
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, fmt.Errorf("not a valid gzip stream: %w", err)
+	}
+
+	tr := tar.NewReader(gz)
+	for {
+		if err := ctx.Err(); err != nil {
+			gz.Close()
+			return nil, err
+		}
+
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			gz.Close()
+			return nil, fmt.Errorf("archive is missing required entry %q", LogFileName)
+		}
+		if err != nil {
+			gz.Close()
+			return nil, fmt.Errorf("corrupt tar stream: %w", err)
+		}
+		if hdr.Name != LogFileName {
+			continue
+		}
+
+		// tr's per-entry reader stays valid only until the next Next call,
+		// which is why this returns from inside the loop rather than
+		// breaking out to shared cleanup.
+		return logStream{Reader: io.LimitReader(tr, opts.MaxLogSize), closer: gz}, nil
+	}
+}
+
+// logStream ties the bounded per-entry reader to the gzip reader backing
+// it, so a single Close releases both.
+type logStream struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (s logStream) Close() error { return s.closer.Close() }
