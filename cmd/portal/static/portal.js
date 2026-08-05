@@ -37,18 +37,33 @@ function parseJSONText(text, status) {
 }
 
 function formatBytes(n) {
-  const mb = n / (1024 * 1024);
-  if (mb >= 1024) {
-    return (mb / 1024).toFixed(1) + " GB";
+  // Divides by 1024, so the labels are the binary units (MiB/GiB), not
+  // the decimal ones (MB/GB) — matches the README, .env.example, and this
+  // page's own help text, which all quote limits in MiB/GiB.
+  const mib = n / (1024 * 1024);
+  if (mib >= 1024) {
+    return (mib / 1024).toFixed(1) + " GiB";
   }
-  return mb.toFixed(1) + " MB";
+  return mib.toFixed(1) + " MiB";
 }
 
 function setUploadProgress(loaded, total) {
   const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
   document.getElementById("upload-bar").value = pct;
+  // Visual only — upload-status is aria-live="off" in the markup — since
+  // this fires many times per second for a large upload. upload-phase
+  // (see announcePhase) is the screen-reader-facing surface and is left
+  // untouched here.
   document.getElementById("upload-status").textContent =
     `Uploading — ${formatBytes(loaded)} / ${formatBytes(total)} (${pct}%)`;
+}
+
+// announcePhase updates the polite live region that only changes at phase
+// transitions (upload started, upload complete). Kept separate from the
+// continuously-updating upload-status text so a screen reader announces
+// twice per submission instead of once per progress event.
+function announcePhase(message) {
+  document.getElementById("upload-phase").textContent = message;
 }
 
 function setUploadProcessing() {
@@ -58,9 +73,11 @@ function setUploadProcessing() {
   // them, and that phase reports no progress of its own. A bar frozen at
   // 100% would read as a hang.
   document.getElementById("upload-bar").removeAttribute("value");
-  document.getElementById("upload-status").textContent =
+  const message =
     "Upload complete. The server is scanning and validating your archive — " +
     "this can take several minutes for a large file. Keep this tab open.";
+  document.getElementById("upload-status").textContent = message;
+  announcePhase(message);
 }
 
 document.getElementById("get-challenge").addEventListener("click", async () => {
@@ -175,6 +192,7 @@ document.getElementById("submit-archive").addEventListener("click", () => {
   button.disabled = true;
   progress.hidden = false;
   setUploadProgress(0, file.size);
+  announcePhase("Upload started.");
 
   // fetch() reports no progress for the request body, so this one call
   // uses XMLHttpRequest; /auth/challenge and /auth/verify stay on fetch.

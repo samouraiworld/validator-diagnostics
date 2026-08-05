@@ -123,7 +123,14 @@
   <button id="submit-archive">Submit</button>
   <div id="upload-progress" hidden>
     <progress id="upload-bar" max="100"></progress>
-    <p id="upload-status" aria-live="polite"></p>
+    <!-- Updated on every progress event (many times per second for a large
+         upload) — visual only, so aria-live is off here to avoid flooding
+         a screen reader with a running byte count. -->
+    <p id="upload-status" aria-live="off"></p>
+    <!-- Assistive-tech-facing counterpart: only changes at phase
+         transitions (upload started / upload complete), so it announces
+         twice per submission instead of once per progress event. -->
+    <p id="upload-phase" class="sr-only" aria-live="polite" role="status"></p>
   </div>
   <p class="error" id="upload-error"></p>
 </section>
