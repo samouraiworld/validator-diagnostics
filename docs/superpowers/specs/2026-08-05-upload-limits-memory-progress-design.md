@@ -326,7 +326,7 @@ guessing.
 - `submission/archive_test.go`: the existing `Result.LogGz` assertions move to
   `OpenLog`. New cases: `OpenLog` streams the same bytes the archive holds;
   its reader is bounded by `MaxLogSize`; it errors when the log entry is
-  absent; `Close` is safe and the reader is unusable after it. Existing
+  absent; it errors on non-gzip input. Existing
   `ValidateArchive` structural tests are unchanged apart from no longer
   reading `LogGz` — including the oversized-log and bad-magic-bytes cases,
   which stay on `ValidateArchive` because that is still where those are
