@@ -1,7 +1,6 @@
 package portal
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -9,22 +8,6 @@ import (
 	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/scoring"
 )
-
-// AdminAuth wraps next with HTTP Basic Auth, checking only the password
-// (any username is accepted) against a single admin password. The
-// comparison is constant-time to avoid a timing side-channel on the
-// password check.
-func AdminAuth(password string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, pass, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="validator-fire-drill-admin"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
 
 // RequireAdminSession wraps next, accepting only requests bearing a
 // valid admin session token (see auth.RequireSession) whose bound
@@ -66,7 +49,7 @@ type AdminSubmission struct {
 }
 
 // AdminSubmissionsHandler serves the recorded submissions, joined with
-// their scoring records, as a JSON array. Wrap it with AdminAuth.
+// their scoring records, as a JSON array. Wrap it with RequireAdminSession.
 func AdminSubmissionsHandler(submissionLog *FileLog, scores *scoring.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
