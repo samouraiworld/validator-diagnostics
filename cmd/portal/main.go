@@ -12,13 +12,21 @@
 // clamd.conf sets both to 2 GiB) or real uploads are rejected with 503.
 //
 // Required environment variables:
-//   - ADMIN_PASSWORD — protects every admin route: /admin,
-//     /admin/submissions, /admin/exercise,
-//     /admin/submissions/{id}/score, and /admin/summary.
-//   - SESSION_SECRET (optional) — hex-encoded HMAC secret for session
-//     tokens. If unset, a random one is generated for this run (sessions
-//     won't survive a restart — fine for a single exercise, not for a
-//     long-lived deployment).
+//   - ADMIN_OPERATOR_ADDRESSES — comma-separated bech32 operator
+//     addresses allowed to authenticate against every admin route:
+//     /admin, /admin/submissions, /admin/exercise,
+//     /admin/submissions/{id}/score, /admin/submissions/{id} (DELETE),
+//     and /admin/summary. Admins sign in the same challenge-tx way
+//     validators do (see /auth/challenge, /auth/verify) — an address
+//     not in this list gets a 403 even with a valid signature.
+//   - SESSION_SECRET (optional) — hex-encoded HMAC secret for validator
+//     upload session tokens. If unset, a random one is generated for
+//     this run (sessions won't survive a restart — fine for a single
+//     exercise, not for a long-lived deployment).
+//   - ADMIN_SESSION_SECRET (optional) — same as SESSION_SECRET, for the
+//     separate admin session tokens, so restarting the portal doesn't
+//     also invalidate in-flight validator upload sessions (or vice
+//     versa).
 package main
 
 import (
@@ -26,13 +34,17 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/gnolang/gno/tm2/pkg/crypto"
 	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/clamav"
 	"github.com/samourai/validator-diagnostics/exercise"
@@ -69,7 +81,8 @@ const defaultMaxLogSize = 64 << 20 // 64 MiB
 func main() {
 	remote := flag.String("remote", "", "gno.land RPC endpoint to verify operator pubkeys against, e.g. https://rpc.test13.testnets.gno.land:443")
 	addr := flag.String("addr", "localhost:8080", "address to listen on")
-	sessionTTL := flag.Duration("session-ttl", 5*time.Minute, "how long an issued session token stays valid")
+	sessionTTL := flag.Duration("session-ttl", 5*time.Minute, "how long an issued validator upload session token stays valid")
+	adminSessionTTL := flag.Duration("admin-session-ttl", time.Hour, "how long an issued admin session token stays valid")
 	uploadDir := flag.String("upload-dir", "", "local directory to save submitted archives into (use this OR the -s3-* flags)")
 	s3Bucket := flag.String("s3-bucket", "", "S3-compatible bucket to save submitted archives into")
 	s3Region := flag.String("s3-region", "", "S3-compatible region")
@@ -87,9 +100,9 @@ func main() {
 		log.Fatal("-remote is required (see docs/resources/gnoland-networks.md in gnolang/gno for known endpoints)")
 	}
 
-	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	if adminPassword == "" {
-		log.Fatal("ADMIN_PASSWORD environment variable is required")
+	adminAllowlist, err := parseAdminAllowlist(os.Getenv("ADMIN_OPERATOR_ADDRESSES"))
+	if err != nil {
+		log.Fatalf("invalid ADMIN_OPERATOR_ADDRESSES: %v", err)
 	}
 
 	store, err := configureStore(*uploadDir, *s3Bucket, *s3Region, *s3Endpoint)
@@ -97,11 +110,17 @@ func main() {
 		log.Fatalf("unable to configure storage: %v", err)
 	}
 
-	sessionSecret, err := loadOrGenerateSessionSecret()
+	sessionSecret, err := loadOrGenerateSecret("SESSION_SECRET")
 	if err != nil {
 		log.Fatalf("unable to prepare session secret: %v", err)
 	}
 	sessions := auth.NewSessionSigner(sessionSecret, *sessionTTL)
+
+	adminSessionSecret, err := loadOrGenerateSecret("ADMIN_SESSION_SECRET")
+	if err != nil {
+		log.Fatalf("unable to prepare admin session secret: %v", err)
+	}
+	adminSessions := auth.NewSessionSigner(adminSessionSecret, *adminSessionTTL)
 
 	nonces := auth.NewNonceStore()
 	verifier := &auth.Verifier{Remote: *remote, Nonces: nonces}
@@ -135,14 +154,14 @@ func main() {
 
 		ArchiveOptions: submission.Options{MaxLogSize: *maxLogSize},
 	})
-	mux.Handle("/admin", portal.AdminAuth(adminPassword, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/admin", portal.RequireAdminSession(adminSessions, adminAllowlist, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "admin.html")
 	})))
-	mux.Handle("/admin/submissions", portal.AdminAuth(adminPassword, portal.AdminSubmissionsHandler(submissionLog, scoresStore)))
-	mux.Handle("/admin/exercise", portal.AdminAuth(adminPassword, exercise.ConfigHandler(exerciseStore)))
-	mux.Handle("POST /admin/submissions/{id}/score", portal.AdminAuth(adminPassword, portal.AdminScoreHandler(submissionLog, scoresStore)))
-	mux.Handle("DELETE /admin/submissions/{id}", portal.AdminAuth(adminPassword, portal.AdminDeleteSubmissionHandler(submissionLog, store, scoresStore)))
-	mux.Handle("/admin/summary", portal.AdminAuth(adminPassword, portal.AdminSummaryHandler(submissionLog, exerciseStore, scoresStore)))
+	mux.Handle("/admin/submissions", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminSubmissionsHandler(submissionLog, scoresStore)))
+	mux.Handle("/admin/exercise", portal.RequireAdminSession(adminSessions, adminAllowlist, exercise.ConfigHandler(exerciseStore)))
+	mux.Handle("POST /admin/submissions/{id}/score", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminScoreHandler(submissionLog, scoresStore)))
+	mux.Handle("DELETE /admin/submissions/{id}", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminDeleteSubmissionHandler(submissionLog, store, scoresStore)))
+	mux.Handle("/admin/summary", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminSummaryHandler(submissionLog, exerciseStore, scoresStore)))
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
 	log.Printf("listening on %s, verifying operator pubkeys against %s", *addr, *remote)
@@ -175,15 +194,43 @@ type errUsage string
 
 func (e errUsage) Error() string { return string(e) }
 
-func loadOrGenerateSessionSecret() ([]byte, error) {
-	if hexSecret := os.Getenv("SESSION_SECRET"); hexSecret != "" {
+// loadOrGenerateSecret loads a hex-encoded HMAC secret from envVar, or
+// generates a random 32-byte one for this run if envVar is unset —
+// sessions issued with a generated secret won't survive a restart,
+// which is fine for a single exercise but not a long-lived deployment.
+func loadOrGenerateSecret(envVar string) ([]byte, error) {
+	if hexSecret := os.Getenv(envVar); hexSecret != "" {
 		return hex.DecodeString(hexSecret)
 	}
 
-	log.Println("SESSION_SECRET not set: generating a random one for this run (sessions won't survive a restart)")
+	log.Printf("%s not set: generating a random one for this run (sessions won't survive a restart)", envVar)
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, err
 	}
 	return secret, nil
+}
+
+// parseAdminAllowlist parses a comma-separated list of bech32 operator
+// addresses into an allowlist set keyed by crypto.Address.String(). An
+// empty list or any invalid address is an error — an admin surface with
+// no valid credentials configured is a misconfiguration, not a
+// degraded-but-running state.
+func parseAdminAllowlist(csv string) (map[string]bool, error) {
+	allowlist := map[string]bool{}
+	for _, raw := range strings.Split(csv, ",") {
+		addrStr := strings.TrimSpace(raw)
+		if addrStr == "" {
+			continue
+		}
+		addr, err := crypto.AddressFromBech32(addrStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid admin operator address %q: %w", addrStr, err)
+		}
+		allowlist[addr.String()] = true
+	}
+	if len(allowlist) == 0 {
+		return nil, errors.New("no admin operator addresses configured (ADMIN_OPERATOR_ADDRESSES is required)")
+	}
+	return allowlist, nil
 }
