@@ -3,7 +3,7 @@
 let adminSessionToken = null;
 let adminCurrentNonce = null;
 let adminCurrentOperatorAddress = null;
-let dashboardStarted = false;
+let refreshIntervalStarted = false;
 
 function setError(id, message) {
   document.getElementById(id).textContent = message || "";
@@ -47,15 +47,20 @@ async function adminFetch(url, options = {}) {
   return resp;
 }
 
-// startDashboard is called once, right after a successful admin
-// verification. dashboardStarted guards against double-starting
-// setInterval if verify were somehow triggered twice.
+// startDashboard is called right after every successful admin
+// verification — including a re-login after a session expired or the
+// operator was dropped from the whitelist — so the initial refresh()
+// and loadExerciseConfig() always run again on re-entry rather than
+// leaving stale data on screen. refreshIntervalStarted only guards the
+// setInterval below, which should keep running from the first login
+// and never be duplicated by a later one.
 function startDashboard() {
-  if (dashboardStarted) return;
-  dashboardStarted = true;
   refresh();
-  setInterval(() => refresh(), 5000);
   loadExerciseConfig();
+  if (!refreshIntervalStarted) {
+    refreshIntervalStarted = true;
+    setInterval(() => refresh(), 5000);
+  }
 }
 
 document.getElementById("admin-get-challenge").addEventListener("click", async () => {
