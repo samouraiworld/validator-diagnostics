@@ -72,11 +72,12 @@ const defaultMaxUploadSize = 2 << 30 // 2 GiB
 // submission's own default is 2 GiB; this deployment standardises lower so
 // one submission cannot tie up an unbounded amount of decompression work.
 //
-// The entry is streamed and never buffered (see submission.OpenLog), so
-// this bounds *compressed* bytes read out of the archive rather than
-// resident memory. The separate bound on *decompressed* bytes is
-// scoring.maxLogScanBytes (1 GiB), which is what stops a small upload from
-// expanding without limit during the log-window scan.
+// The entry is streamed and never buffered (see submission.ValidateArchive
+// and submission.OpenLog), so this bounds *compressed* bytes read out of
+// the archive rather than resident memory. The separate bound on
+// *decompressed* bytes is scoring.maxLogScanBytes (1 GiB), which is what
+// stops a small upload from expanding without limit during the
+// log-window scan.
 //
 // 256 MiB is roughly 2.5x the largest real submission seen so far. Raise it
 // with -max-log-size (MAX_LOG_SIZE in .env) if real submissions bump into
