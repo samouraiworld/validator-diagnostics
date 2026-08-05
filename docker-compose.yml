@@ -78,7 +78,7 @@ services:
       - -clamav-addr=clamav:3310
       - -clamav-timeout=15m
       # Must stay <= clamd.conf's StreamMaxLength.
-      - -max-upload-size=${MAX_UPLOAD_SIZE:-2147483648}
+      - -max-upload-size=${MAX_UPLOAD_SIZE:-2147483647}
       # Streamed, not buffered — see submission.ValidateArchive and
       # submission.OpenLog. The ceiling here is decompression work, not
       # resident memory.

@@ -69,7 +69,7 @@ log persist across `docker compose down` / `up` in named volumes.
 | `-scores-path` | no | Path to the scoring records file (default `./scores.json`) |
 | `-clamav-addr` | no (recommended) | clamd address to scan uploads against — `host:port`, or `unix:/path/to/socket`. Unset disables scanning: fine for local dev, **not** for production |
 | `-clamav-timeout` | no | Time budget for one clamd scan, dial included (default `15m`). Must cover streaming a whole `-max-upload-size` archive to clamd |
-| `-max-upload-size` | no | Maximum accepted upload, in bytes (default 2 GiB). Keep it at or below clamd's `StreamMaxLength` — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `-max-upload-size` | no | Maximum accepted upload, in bytes (default 2147483647 — 2 GiB minus one, which is the largest file libclamav can scan). Keep it at or below clamd's `StreamMaxLength` — see [Upload size and ClamAV](#upload-size-and-clamav) |
 | `-max-log-size` | no | Maximum accepted size of the `gnoland.log.gz` entry inside the archive, in bytes (default 256 MiB). The entry is streamed, not buffered, so this bounds decompression work rather than memory |
 
 | Environment variable | Required | Description |
@@ -78,8 +78,8 @@ log persist across `docker compose down` / `up` in named volumes.
 | `SESSION_SECRET` | no | Hex-encoded HMAC secret for session tokens. If unset, a random one is generated for the run — fine for a single exercise, not for a long-lived deployment (sessions won't survive a restart) |
 | `ADMIN_SESSION_SECRET` | no | Hex-encoded HMAC secret for admin session tokens, kept separate from `SESSION_SECRET` so restarting the portal or rotating one secret doesn't affect the other session type. If unset, a random one is generated for the run |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | with `-s3-bucket` | Credentials for the S3-compatible backend |
-| `MAX_UPLOAD_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-upload-size` (default 2 GiB). Unlike the other variables here, the binary does not read it directly. Must stay at or below clamd's `StreamMaxLength` — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 256 MiB). Not read directly by the binary either |
+| `MAX_UPLOAD_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-upload-size` (default 2147483647, i.e. 2 GiB minus one — libclamav cannot scan a larger file, so raising it only turns rejections into 503s). Unlike the other variables here, the binary does not read it directly. Must stay at or below clamd's `StreamMaxLength` — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 256 MiB). Not read directly by the binary either. In practice the antivirus ceiling binds first: a log compressing 15:1 can only reach ~140 MB before its decompressed form outgrows what clamd can scan — see [Upload size and ClamAV](#upload-size-and-clamav) |
 
 ### Upload size and ClamAV
 
@@ -91,9 +91,37 @@ what this portal accepts, so the two limits have to agree or real uploads
 get rejected with a 503.
 
 `clamd.conf` (bind-mounted by `docker-compose.yml`) raises clamd's stream
-and file limits to **2 GiB**, matching `-max-upload-size`'s default (set
-via `MAX_UPLOAD_SIZE` in `.env` under Docker Compose). Change one and you
-must change the other.
+and file limits to **2147483647 bytes — 2 GiB minus one**, matching
+`-max-upload-size`'s default (set via `MAX_UPLOAD_SIZE` in `.env` under
+Docker Compose). Change one and you must change the other.
+
+#### The 2 GiB wall
+
+That odd-looking number is a hard ceiling, not a tuning choice. libclamav
+cannot scan any single file of 2147483648 bytes or more. Configure a
+larger `MaxFileSize` and clamd accepts the value, logs
+
+```text
+LibClamAV Warning: Max file-size was set to N bytes. Unfortunately, scanning
+files greater than 2147483647 bytes (2 GiB - 1) is not supported.
+```
+
+and then rejects oversized input at scan time with
+`Heuristics.Limits.Exceeded.MaxFileSize`, which the portal reports as a 503.
+Raising the limits does not buy headroom; it only moves the failure later.
+(Verified against ClamAV 1.5.3.)
+
+The ceiling applies to **every file clamd extracts**, not just the upload —
+including `gnoland.log.gz` decompressed. That is the constraint that
+actually binds in practice: real gnoland logs compress about 15:1, so a
+compressed log much beyond ~140 MB expands past what clamd can scan and its
+submission is rejected, even though the archive itself is nowhere near
+2 GiB. `MAX_LOG_SIZE`'s 256 MiB default is an upper bound that only
+poorly-compressing logs can safely reach.
+
+Accepting genuinely large archives therefore needs the portal to stop
+handing clamd one oversized stream and start scanning the decompressed log
+in windows below the ceiling. That work is not done yet.
 
 It also sets `AlertExceedsMax yes`, which is what stops the AV layer from
 failing *open*. By default clamd silently skips content that exceeds

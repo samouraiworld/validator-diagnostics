@@ -27,10 +27,13 @@ const (
 	// without MaxUploadSize. Deliberately below prd.md's "for example
 	// 10 GB": with an AV scanner wired in, anything above clamd's
 	// StreamMaxLength is guaranteed to 503, and cmd/portal and
-	// clamd.conf both standardise on 2 GiB. Change this and you are
-	// changing what an unconfigured handler accepts but clamd won't
+	// clamd.conf both standardise on this same value. Change this and you
+	// are changing what an unconfigured handler accepts but clamd won't
 	// scan — see the README section "Upload size and ClamAV".
-	defaultMaxUploadSize = 2 << 30
+	//
+	// 2 GiB minus one byte, not a round 2 GiB: libclamav cannot scan a
+	// file of 2147483648 bytes or more, and no clamd setting lifts that.
+	defaultMaxUploadSize = 2147483647
 
 	// multipartMemoryThreshold is how much of the request Go buffers in
 	// memory before spilling additional parts to its own temp files —

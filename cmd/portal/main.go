@@ -63,10 +63,16 @@ var staticFiles embed.FS
 // standardises on, and it is deliberately *not* prd.md's "for example
 // 10 GB": every upload is streamed to clamd before it is stored, and
 // clamd refuses anything past its own StreamMaxLength (25 MiB out of the
-// box). The bundled clamd.conf raises that limit to this same 2 GiB, so
+// box). The bundled clamd.conf raises that limit to this same value, so
 // the two bounds agree; raising one without the other turns oversized
 // uploads into 503s instead of a clean rejection.
-const defaultMaxUploadSize = 2 << 30 // 2 GiB
+//
+// The value is 2 GiB minus one byte rather than a round 2 GiB because
+// libclamav cannot scan a file of 2147483648 bytes or more at all — no
+// clamd.conf setting lifts that, so an upload of exactly 2 GiB would be
+// accepted here and then fail the scan with a 503. See clamd.conf's own
+// comment for the warning clamd logs when you try.
+const defaultMaxUploadSize = 2147483647 // 2 GiB - 1, libclamav's hard scan ceiling
 
 // defaultMaxLogSize caps the gnoland.log.gz entry inside the archive.
 // submission's own default is 2 GiB; this deployment standardises lower so
