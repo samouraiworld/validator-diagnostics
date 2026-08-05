@@ -118,18 +118,18 @@ func TestAdminSubmissionsHandler_TotalAndPending(t *testing.T) {
 		}
 	}
 
-	ack, irq := 20, 15
+	irq := 15
 	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
 	if err := scoresStore.Set(scoring.Result{
 		SubmissionID: "partial", Scored: true,
-		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
+		UploadTimeScore: 25, MetadataScore: 25, LogQualityScore: 25,
 	}); err != nil {
 		t.Fatalf("scoresStore.Set: %v", err)
 	}
 	if err := scoresStore.Set(scoring.Result{
 		SubmissionID: "complete", Scored: true,
-		UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20,
-		AckTimeScore: &ack, IncidentResponseQualityScore: &irq,
+		UploadTimeScore: 25, MetadataScore: 25, LogQualityScore: 25,
+		IncidentResponseQualityScore: &irq,
 	}); err != nil {
 		t.Fatalf("scoresStore.Set: %v", err)
 	}
@@ -152,11 +152,11 @@ func TestAdminSubmissionsHandler_TotalAndPending(t *testing.T) {
 	for _, s := range submissions {
 		byID[s.ID] = s
 	}
-	if got := byID["partial"]; got.TotalScore != 60 || !got.Pending {
-		t.Errorf("partial: total_score = %d, pending = %v; want 60, true", got.TotalScore, got.Pending)
+	if got := byID["partial"]; got.TotalScore != 75 || !got.Pending {
+		t.Errorf("partial: total_score = %d, pending = %v; want 75, true", got.TotalScore, got.Pending)
 	}
-	if got := byID["complete"]; got.TotalScore != 95 || got.Pending {
-		t.Errorf("complete: total_score = %d, pending = %v; want 95, false", got.TotalScore, got.Pending)
+	if got := byID["complete"]; got.TotalScore != 90 || got.Pending {
+		t.Errorf("complete: total_score = %d, pending = %v; want 90, false", got.TotalScore, got.Pending)
 	}
 }
 
@@ -173,11 +173,11 @@ func TestAdminSubmissionsHandler_UnscoredIsPendingEvenWithManualScores(t *testin
 		t.Fatalf("Record: %v", err)
 	}
 
-	ack, irq := 20, 5
+	irq := 5
 	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
 	if err := scoresStore.Set(scoring.Result{
 		SubmissionID: "never-auto-scored", Scored: false,
-		AckTimeScore: &ack, IncidentResponseQualityScore: &irq,
+		IncidentResponseQualityScore: &irq,
 	}); err != nil {
 		t.Fatalf("scoresStore.Set: %v", err)
 	}

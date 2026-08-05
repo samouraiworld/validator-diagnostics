@@ -159,8 +159,8 @@ func TestScanLogWindow_TruncatedIsNotTreatedAsCovered(t *testing.T) {
 	if window.Covered {
 		t.Error("window.Covered = true, want false: the tail was never read, so coverage was never verified")
 	}
-	if got := LogQualityScore(window); got != 15 {
-		t.Errorf("LogQualityScore = %d, want 15 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
+	if got := LogQualityScore(window); got != 19 {
+		t.Errorf("LogQualityScore = %d, want 19 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
 	}
 }
 
@@ -247,6 +247,61 @@ func TestAutoChecks_LogWindowNotTruncatedWhenUnderCap(t *testing.T) {
 func TestAutoChecks_LogWindowNoTimestamps(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t, "no timestamp here", "nor here either")
+
+	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	if window.Detected {
+		t.Errorf("window = %+v, want !Detected", window)
+	}
+}
+
+func TestAutoChecks_LogWindowDetectsJSONEpochTimestamps(t *testing.T) {
+	// gnoland's actual logger (cometbft/tendermint-style) emits structured
+	// JSON lines with a "ts" field holding a Unix epoch float, not a
+	// leading RFC3339 string — e.g.
+	// {"level":"info","ts":1783659600.5,"msg":"starting up"}. Real
+	// submissions use this format, so the log-quality check has to
+	// understand it too, not just the plain-text fixture format the other
+	// tests use.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		// 2026-07-08T17:00:00.5Z, before the window opens
+		`{"level":"info","ts":1783530000.5,"msg":"starting up","module":"main"}`,
+		// 2026-07-08T20:00:00.25Z, mid-window
+		`{"level":"info","ts":1783540800.25,"msg":"consensus running","module":"consensus"}`,
+		// 2026-07-09T19:00:00Z, after the window closes — no fractional
+		// part, since a real logger doesn't always emit one
+		`{"level":"info","ts":1783623600,"msg":"shutting down","module":"main"}`,
+	)
+
+	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	if !window.Detected {
+		t.Fatalf("window = %+v, want Detected (JSON \"ts\" epoch timestamps should be recognized)", window)
+	}
+	if !window.Covered {
+		t.Errorf("window = %+v, want Covered", window)
+	}
+
+	wantFirst := time.Date(2026, 7, 8, 17, 0, 0, 500000000, time.UTC)
+	if !window.FirstSeen.Equal(wantFirst) {
+		t.Errorf("FirstSeen = %v, want %v", window.FirstSeen, wantFirst)
+	}
+	wantLast := time.Date(2026, 7, 9, 19, 0, 0, 0, time.UTC)
+	if !window.LastSeen.Equal(wantLast) {
+		t.Errorf("LastSeen = %v, want %v", window.LastSeen, wantLast)
+	}
+}
+
+func TestAutoChecks_LogWindowIgnoresJSONLinesWithoutTs(t *testing.T) {
+	// A JSON line missing "ts" (or with a non-numeric one) must be
+	// skipped like any other unparseable line, not treated as a zero
+	// timestamp — that would silently drag FirstSeen back to the Unix
+	// epoch.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		`{"level":"info","msg":"no ts field here"}`,
+		`{"level":"info","ts":"not-a-number","msg":"ts is a string"}`,
+		`not json at all`,
+	)
 
 	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
 	if window.Detected {

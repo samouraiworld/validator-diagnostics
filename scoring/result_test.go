@@ -3,19 +3,18 @@ package scoring
 import "testing"
 
 func TestResult_TotalScore_AutoOnly(t *testing.T) {
-	r := Result{UploadTimeScore: 20, MetadataScore: 20, LogQualityScore: 20}
-	if got := r.TotalScore(); got != 60 {
-		t.Errorf("TotalScore() = %d, want 60 (manual fields not yet entered count as 0)", got)
+	r := Result{UploadTimeScore: 25, MetadataScore: 25, LogQualityScore: 25}
+	if got := r.TotalScore(); got != 75 {
+		t.Errorf("TotalScore() = %d, want 75 (manual field not yet entered counts as 0)", got)
 	}
 }
 
 func TestResult_TotalScore_Full(t *testing.T) {
-	ack, irq := 15, 18
+	irq := 18
 	r := Result{
-		UploadTimeScore:              20,
-		MetadataScore:                20,
-		LogQualityScore:              20,
-		AckTimeScore:                 &ack,
+		UploadTimeScore:              25,
+		MetadataScore:                25,
+		LogQualityScore:              25,
 		IncidentResponseQualityScore: &irq,
 	}
 	if got := r.TotalScore(); got != 93 {

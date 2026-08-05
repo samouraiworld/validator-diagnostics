@@ -82,7 +82,7 @@ body {
 }
 
 body.wide {
-  max-width: 960px;
+  max-width: 1180px;
 }
 
 h1, h2 {
@@ -144,7 +144,7 @@ h1, h2 {
   flex-shrink: 0;
 }
 
-input[type="text"], input[type="file"], textarea {
+input[type="text"], input[type="number"], input[type="file"], textarea {
   display: block;
   width: 100%;
   margin: 0.5rem 0;
@@ -163,7 +163,7 @@ textarea {
   line-height: 1.5;
 }
 
-input[type="text"]:focus, input[type="file"]:focus, textarea:focus {
+input[type="text"]:focus, input[type="number"]:focus, input[type="file"]:focus, textarea:focus {
   outline: 2px solid var(--brand);
   outline-offset: 1px;
   border-color: var(--brand);
@@ -213,6 +213,21 @@ th, td {
   border-bottom: 1px solid var(--border);
   padding: 0.6rem 0.5rem;
   text-align: left;
+}
+
+td {
+  /* Rows hold multi-line cells (validator identity, the score form) —
+     top alignment keeps a one-line cell like Checks level with the
+     first line of its neighbours instead of drifting to a false middle. */
+  vertical-align: top;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+#submissions {
+  min-width: 800px;
 }
 
 th {
@@ -310,10 +325,86 @@ details.archive-help ul {
   color: var(--brand-contrast);
 }
 
+.validator-name {
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.validator-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  /* Bech32 addresses and "<moniker>-<date>.tar.gz" filenames run long;
+     let them break rather than force the column wider than the
+     identity info deserves relative to Score/Checks/Manual entry. */
+  overflow-wrap: anywhere;
+}
+
+.validator-name + .validator-meta {
+  margin-top: 0.15rem;
+}
+
+.score-total {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+}
+
+.checks-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+}
+
+.checks-cell .badge {
+  margin-right: 0;
+}
+
+.score-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 12rem;
+}
+
+.score-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.score-field-label {
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .score-form input {
-  width: 3.5rem;
-  display: inline-block;
-  margin: 0 0.25rem;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.35rem 0.45rem;
+  font-size: 0.85rem;
+}
+
+.score-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.1rem;
+}
+
+.btn-sm {
+  padding: 0.35rem 0.9rem;
+  font-size: 0.85rem;
+}
+
+.form-error {
+  font-size: 0.8rem;
 }
 
 .tabs {

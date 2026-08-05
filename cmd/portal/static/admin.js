@@ -18,31 +18,51 @@ function isEditing() {
   return Boolean(table && active && table.contains(active));
 }
 
-function buildScoreForm(id, score) {
-  const form = document.createElement("span");
-  form.className = "score-form";
+// buildLabeledInput wraps input in a <label> with visible text above it
+// — the previous version relied on placeholder text alone to say what
+// each box was for, which disappears the moment the admin starts
+// typing (and never appears at all once a value is prefilled).
+function buildLabeledInput(labelText, input) {
+  const label = document.createElement("label");
+  label.className = "score-field";
+  const span = document.createElement("span");
+  span.className = "score-field-label";
+  span.textContent = labelText;
+  label.append(span, input);
+  return label;
+}
 
-  const ackInput = document.createElement("input");
-  ackInput.type = "text";
-  ackInput.placeholder = "ack RFC3339";
+function buildScoreForm(id, score) {
+  const form = document.createElement("div");
+  form.className = "score-form";
 
   const irqInput = document.createElement("input");
   irqInput.type = "number";
   irqInput.min = "0";
-  irqInput.max = "20";
-  irqInput.placeholder = "0-20";
+  irqInput.max = "25";
+  irqInput.placeholder = "0-25";
 
   // Prefill from what was already recorded, so the form shows the
-  // current values instead of looking permanently unfilled.
-  if (score) {
-    if (score.acknowledged_at) ackInput.value = score.acknowledged_at;
-    if (typeof score.incident_response_quality_score === "number") {
-      irqInput.value = String(score.incident_response_quality_score);
-    }
+  // current value instead of looking permanently unfilled.
+  if (score && typeof score.incident_response_quality_score === "number") {
+    irqInput.value = String(score.incident_response_quality_score);
   }
 
+  const actions = document.createElement("div");
+  actions.className = "score-form-actions";
+
   const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn-sm";
   button.textContent = "Save";
+
+  // Errors from a Save land next to the form that produced them —
+  // the shared #admin-error banner lives below the whole table, easy
+  // to miss on a page with many rows, and previously the only place
+  // this exact error ever appeared.
+  const error = document.createElement("span");
+  error.className = "error form-error";
+
   button.addEventListener("click", async () => {
     // An empty box gives Number("") === 0 and junk gives NaN, which
     // JSON.stringify writes as null. Both used to reach the server as a
@@ -50,8 +70,7 @@ function buildScoreForm(id, score) {
     // relying on the 400 alone.
     const irq = Number(irqInput.value.trim());
     if (irqInput.value.trim() === "" || !Number.isInteger(irq)) {
-      document.getElementById("admin-error").textContent =
-        "Incident response quality score is required (whole number, 0-20).";
+      error.textContent = "Incident response quality score is required (whole number, 0-25).";
       return;
     }
 
@@ -61,25 +80,28 @@ function buildScoreForm(id, score) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          acknowledged_at: ackInput.value.trim(),
           incident_response_quality_score: irq,
         }),
       });
     } catch (err) {
-      document.getElementById("admin-error").textContent = "Network error: " + err.message;
+      error.textContent = "Network error: " + err.message;
       return;
     }
     if (!resp.ok) {
-      document.getElementById("admin-error").textContent = await resp.text();
+      error.textContent = await resp.text();
       return;
     }
-    document.getElementById("admin-error").textContent = "";
+    error.textContent = "";
     // force: this refresh is the point of the click, and focus is still
     // inside the table (on this button) when it runs.
     refresh({ force: true });
   });
 
-  form.append(ackInput, irqInput, button);
+  actions.append(button, error);
+  form.append(
+    buildLabeledInput("Incident response (0–25)", irqInput),
+    actions,
+  );
   return form;
 }
 
@@ -125,25 +147,45 @@ async function refresh({ force = false } = {}) {
   for (const s of submissions) {
     const row = document.createElement("tr");
 
-    for (const value of [s.moniker, s.operator_address, s.filename, s.submitted_at]) {
-      const cell = document.createElement("td");
-      cell.textContent = value; // never innerHTML — these are validator-controlled strings
-      row.appendChild(cell);
-    }
+    // Identity used to be four separate columns (moniker, operator
+    // address, filename, submitted at), which left barely any width for
+    // the columns admins actually act on. Everything below the moniker
+    // is secondary, so it's demoted to a muted subline instead of
+    // competing for its own column.
+    const validatorCell = document.createElement("td");
+    const monikerEl = document.createElement("div");
+    monikerEl.className = "validator-name";
+    monikerEl.textContent = s.moniker; // never innerHTML — validator-controlled strings
+    const addressEl = document.createElement("div");
+    addressEl.className = "validator-meta";
+    addressEl.textContent = s.operator_address;
+    const fileEl = document.createElement("div");
+    fileEl.className = "validator-meta";
+    fileEl.textContent = `${s.filename} · ${s.submitted_at}`;
+    validatorCell.append(monikerEl, addressEl, fileEl);
+    row.appendChild(validatorCell);
 
     // total_score/pending come from the server (portal.AdminSubmission)
     // — the rubric lives in the scoring package, never in here.
     const scoreCell = document.createElement("td");
     if (!s.score || !s.score.scored) {
-      scoreCell.textContent = "not yet scored";
-    } else if (s.pending) {
-      scoreCell.textContent = `${s.total_score}/100 (manual scores pending)`;
+      const notYetScored = document.createElement("span");
+      notYetScored.className = "validator-meta";
+      notYetScored.textContent = "not yet scored";
+      scoreCell.appendChild(notYetScored);
     } else {
-      scoreCell.textContent = `${s.total_score}/100`;
+      const totalEl = document.createElement("div");
+      totalEl.className = "score-total";
+      totalEl.textContent = `${s.total_score}/100`;
+      scoreCell.append(
+        totalEl,
+        s.pending ? badge("caution", "pending") : badge("ok", "final"),
+      );
     }
     row.appendChild(scoreCell);
 
     const checksCell = document.createElement("td");
+    checksCell.className = "checks-cell";
     if (s.score && s.score.scored) {
       const w = s.score.log_window;
       let logState = "warn";
