@@ -85,7 +85,7 @@
       <li><code>metadata.json</code> — validator and environment metadata; schema and example below. Unknown fields are rejected.</li>
       <li>Exactly these two files at the top level of the archive — no subfolders, no symlinks, no extra files.</li>
       <li><code>validator_address</code> must match your operator address; <code>moniker</code> must match the archive's filename.</li>
-      <li>Size limits: <code>gnoland.log.gz</code> ≤ 2 GiB, <code>metadata.json</code> ≤ 64 KiB, total upload ≤ 10 GiB.</li>
+      <li>Size limits: <code>gnoland.log.gz</code> ≤ 256 MiB, <code>metadata.json</code> ≤ 64 KiB, total upload ≤ 2 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.</li>
     </ul>
     <p>Example <code>metadata.json</code>:</p>
     <pre>{
@@ -121,6 +121,10 @@
   <label for="archive-file">Diagnostic archive (&lt;moniker&gt;-&lt;YYYYMMDD-HHMMUTC&gt;.tar.gz)</label>
   <input type="file" id="archive-file" accept=".gz,.tar.gz">
   <button id="submit-archive">Submit</button>
+  <div id="upload-progress" hidden>
+    <progress id="upload-bar" max="100"></progress>
+    <p id="upload-status" aria-live="polite"></p>
+  </div>
   <p class="error" id="upload-error"></p>
 </section>
 

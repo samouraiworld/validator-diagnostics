@@ -528,3 +528,44 @@ button.danger:hover {
   background: none;
   border-color: var(--error);
 }
+
+#upload-progress {
+  margin: 0.75rem 0;
+}
+
+/* Styling <progress> needs all three vendor pseudo-elements: the bare
+   rules cover Firefox's track and the legacy fallback, the ::-webkit-*
+   pair covers Chrome/Safari. All of them use the existing custom
+   properties, so dark mode follows without a second set of rules. */
+progress {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--brand);
+  overflow: hidden;
+}
+
+progress::-webkit-progress-bar {
+  background: var(--surface);
+  border-radius: 6px;
+}
+
+progress::-webkit-progress-value {
+  background: var(--brand);
+  border-radius: 6px;
+}
+
+progress::-moz-progress-bar {
+  background: var(--brand);
+  border-radius: 6px;
+}
+
+#upload-status {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
