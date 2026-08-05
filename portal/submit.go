@@ -6,6 +6,7 @@
 package portal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,10 +27,13 @@ const (
 	// without MaxUploadSize. Deliberately below prd.md's "for example
 	// 10 GB": with an AV scanner wired in, anything above clamd's
 	// StreamMaxLength is guaranteed to 503, and cmd/portal and
-	// clamd.conf both standardise on 2 GiB. Change this and you are
-	// changing what an unconfigured handler accepts but clamd won't
+	// clamd.conf both standardise on this same value. Change this and you
+	// are changing what an unconfigured handler accepts but clamd won't
 	// scan — see the README section "Upload size and ClamAV".
-	defaultMaxUploadSize = 2 << 30
+	//
+	// 2 GiB minus one byte, not a round 2 GiB: libclamav cannot scan a
+	// file of 2147483648 bytes or more, and no clamd setting lifts that.
+	defaultMaxUploadSize = 2147483647
 
 	// multipartMemoryThreshold is how much of the request Go buffers in
 	// memory before spilling additional parts to its own temp files —
@@ -207,19 +211,45 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			result := scoring.Result{SubmissionID: submissionID}
 			if cfg.Configured() {
-				genesisMatch, versionSupported, window := scoring.AutoChecks(metadata, archiveResult.LogGz, cfg)
-				result.Scored = true
-				result.GenesisMatch = genesisMatch
-				result.VersionSupported = versionSupported
-				result.LogWindow = window
-				result.UploadTimeScore = scoring.TieredTimeScore(recordedAt, cfg)
-				// Always 25: ValidateMetadata above already gated this
-				// submission on a schema-valid metadata.json, so by the
-				// time a Result exists at all, this criterion is
-				// structurally satisfied — see scoring.LogQualityScore's
-				// doc comment for the analogous reasoning on log quality.
-				result.MetadataScore = 25
-				result.LogQualityScore = scoring.LogQualityScore(window)
+				// The archive is already stored (Store.Save above) by
+				// the time this runs, so scoring is organizer-side
+				// work, not something the validator's own request
+				// should be able to cut short: a validator who closes
+				// their browser during the "server is scanning" phase
+				// — which the UI explicitly says can take several
+				// minutes — must not leave the archive stored but
+				// permanently unscored. WithoutCancel keeps
+				// request-scoped values but drops cancellation, so
+				// this call runs to completion regardless of client
+				// disconnect.
+				scoringCtx := context.WithoutCancel(r.Context())
+				genesisMatch, versionSupported, window, err := autoChecks(scoringCtx, file, h.ArchiveOptions, metadata, cfg)
+				if err != nil {
+					// The archive is already stored and the validator has
+					// their submission; a scoring read that fails here is
+					// an organizer-side problem, so it is logged and the
+					// result stays unscored rather than failing the
+					// request. Same reasoning as the Exercise.Get failure
+					// handled just above.
+					log.Printf("scoring: unable to read the log for %s: %v", header.Filename, err)
+				} else {
+					// Scored is set here, not before the checks: a
+					// Scored: true record carrying zero-valued checks
+					// would claim a submission was assessed when the read
+					// that would have assessed it failed.
+					result.Scored = true
+					result.GenesisMatch = genesisMatch
+					result.VersionSupported = versionSupported
+					result.LogWindow = window
+					result.UploadTimeScore = scoring.TieredTimeScore(recordedAt, cfg)
+					// Always 25: ValidateMetadata above already gated this
+					// submission on a schema-valid metadata.json, so by the
+					// time a Result exists at all, this criterion is
+					// structurally satisfied — see scoring.LogQualityScore's
+					// doc comment for the analogous reasoning on log quality.
+					result.MetadataScore = 25
+					result.LogQualityScore = scoring.LogQualityScore(window)
+				}
 			}
 			if h.Scores != nil {
 				if err := h.Scores.Set(result); err != nil {
@@ -257,4 +287,27 @@ func writeSubmitResult(w http.ResponseWriter, status int, resp submitResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// autoChecks runs the Phase 3 automatic checks against the log entry inside
+// file, streaming it straight out of the archive rather than holding it in
+// memory. file must be the already-validated upload; it is rewound first,
+// so callers must not rely on its offset afterwards.
+//
+// This is a function rather than four inline statements so the stream is
+// closed as soon as the checks are done, rather than at the end of the
+// whole request.
+func autoChecks(ctx context.Context, file io.ReadSeeker, opts submission.Options, meta submission.Metadata, cfg exercise.Config) (genesisMatch, versionSupported bool, window scoring.LogWindowCheck, err error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, false, scoring.LogWindowCheck{}, fmt.Errorf("rewinding upload: %w", err)
+	}
+
+	logGz, err := submission.OpenLog(ctx, file, opts)
+	if err != nil {
+		return false, false, scoring.LogWindowCheck{}, err
+	}
+	defer logGz.Close()
+
+	genesisMatch, versionSupported, window = scoring.AutoChecks(meta, logGz, cfg)
+	return genesisMatch, versionSupported, window, nil
 }

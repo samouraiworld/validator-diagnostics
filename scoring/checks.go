@@ -2,7 +2,6 @@ package scoring
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"io"
@@ -15,8 +14,8 @@ import (
 
 // maxLogScanBytes bounds how much *decompressed* plaintext scanLogWindow
 // will read out of gnoland.log.gz, independent of the compressed-size
-// cap submission.ValidateArchive already applied to logGz. This is the
-// inner-layer equivalent of prd.md's "decompressed-size limit,
+// cap submission.ValidateArchive enforces and submission.OpenLog re-applies.
+// This is the inner-layer equivalent of prd.md's "decompressed-size limit,
 // independent from the compressed upload size limit": gnoland.log.gz's
 // own content is itself gzip-compressed plaintext that ValidateArchive
 // never decompresses, so this is the first place that decompression
@@ -43,13 +42,14 @@ var timestampLayouts = []string{
 	time.RFC3339,
 }
 
-// AutoChecks runs prd.md's Phase 3 "Automatic validation" checks for
-// one submission: genesis hash, supported gnoland version, and
-// investigation-window coverage of the submitted log. logGz must be
-// submission.Result.LogGz — the same bounded bytes ValidateArchive
-// already read — never a second, independent read of the raw upload
+// AutoChecks runs prd.md's Phase 3 "Automatic validation" checks for one
+// submission: genesis hash, supported gnoland version, and
+// investigation-window coverage of the submitted log. logGz must be the
+// stream returned by submission.OpenLog — the same archive entry
+// ValidateArchive already accepted, read straight out of the upload and
+// never buffered — and never a second, independent read of the raw upload
 // (see this repo's Phase 3 design spec, "Security").
-func AutoChecks(meta submission.Metadata, logGz []byte, cfg exercise.Config) (genesisMatch, versionSupported bool, window LogWindowCheck) {
+func AutoChecks(meta submission.Metadata, logGz io.Reader, cfg exercise.Config) (genesisMatch, versionSupported bool, window LogWindowCheck) {
 	// Compared on content, not presentation. A hash is the same hash in
 	// either case — sha256sum emits lowercase, a block explorer or
 	// Windows CertUtil commonly uppercase — and form fields collect stray
@@ -77,8 +77,8 @@ func AutoChecks(meta submission.Metadata, logGz []byte, cfg exercise.Config) (ge
 // exact log format isn't part of prd.md's contract. budget is a
 // parameter rather than a constant so tests can exercise the truncation
 // path without generating maxLogScanBytes of input.
-func scanLogWindow(logGz []byte, cfg exercise.Config, budget int64) LogWindowCheck {
-	gz, err := gzip.NewReader(bytes.NewReader(logGz))
+func scanLogWindow(logGz io.Reader, cfg exercise.Config, budget int64) LogWindowCheck {
+	gz, err := gzip.NewReader(logGz)
 	if err != nil {
 		return LogWindowCheck{}
 	}

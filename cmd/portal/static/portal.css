@@ -528,3 +528,78 @@ button.danger:hover {
   background: none;
   border-color: var(--error);
 }
+
+#upload-progress {
+  margin: 0.75rem 0;
+}
+
+/* Styling <progress> needs all three vendor pseudo-elements: the bare
+   rules cover Firefox's track and the legacy fallback, the ::-webkit-*
+   pair covers Chrome/Safari. All of them use the existing custom
+   properties, so dark mode follows without a second set of rules. */
+progress {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--brand);
+  overflow: hidden;
+}
+
+progress::-webkit-progress-bar {
+  background: var(--surface);
+  border-radius: 6px;
+}
+
+progress::-webkit-progress-value {
+  background: var(--brand);
+  border-radius: 6px;
+}
+
+progress::-moz-progress-bar {
+  background: var(--brand);
+  border-radius: 6px;
+}
+
+#upload-status {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* When progress has appearance: none and its value attribute is removed
+   (indeterminate state), the vendor pseudo-elements ::-webkit-progress-value
+   and ::-moz-progress-bar become inert. Drive the indeterminate animation
+   from the element's own background instead, using repeating-linear-gradient
+   and @keyframes to move background-position. */
+progress:indeterminate {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--brand) 0px,
+    var(--brand) 20px,
+    var(--surface) 20px,
+    var(--surface) 40px
+  );
+  background-size: 80px 100%;
+  background-position: 0 0;
+  animation: indeterminate-progress 1.5s linear infinite;
+}
+
+@keyframes indeterminate-progress {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 80px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  progress:indeterminate {
+    animation: none;
+    background-position: 0 0;
+  }
+}

@@ -11,7 +11,7 @@ import (
 	"github.com/samourai/validator-diagnostics/submission"
 )
 
-func gzipLines(t *testing.T, lines ...string) []byte {
+func gzipLines(t *testing.T, lines ...string) *bytes.Reader {
 	t.Helper()
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -23,7 +23,7 @@ func gzipLines(t *testing.T, lines ...string) []byte {
 	if err := gw.Close(); err != nil {
 		t.Fatalf("gzip close: %v", err)
 	}
-	return buf.Bytes()
+	return bytes.NewReader(buf.Bytes())
 }
 
 func windowTestConfig() exercise.Config {
@@ -228,7 +228,7 @@ func TestScanLogWindow_BudgetBoundsDecompression(t *testing.T) {
 		t.Fatalf("gzip close: %v", err)
 	}
 
-	window := scanLogWindow(buf.Bytes(), cfg, budget)
+	window := scanLogWindow(&buf, cfg, budget)
 	if !window.Truncated {
 		t.Errorf("window = %+v, want Truncated: the scan must stop at its budget rather than decompress the whole stream", window)
 	}
@@ -312,7 +312,7 @@ func TestAutoChecks_LogWindowIgnoresJSONLinesWithoutTs(t *testing.T) {
 func TestAutoChecks_LogNotGzip(t *testing.T) {
 	cfg := windowTestConfig()
 
-	_, _, window := AutoChecks(submission.Metadata{}, []byte("not gzip at all"), cfg)
+	_, _, window := AutoChecks(submission.Metadata{}, strings.NewReader("not gzip at all"), cfg)
 	if window.Detected || window.Covered {
 		t.Errorf("window = %+v, want the zero value for unparseable input", window)
 	}
