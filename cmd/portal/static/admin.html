@@ -51,6 +51,27 @@
   <h1>Validator Fire Drill — Submissions</h1>
 </header>
 
+<section id="admin-step-address" class="step">
+  <h2>Admin sign-in</h2>
+  <label for="admin-operator-address">Your valopers operator address</label>
+  <input type="text" id="admin-operator-address" placeholder="g1...">
+  <button id="admin-get-challenge">Get challenge</button>
+  <p class="error" id="admin-address-error"></p>
+</section>
+
+<section id="admin-step-sign" class="step" hidden>
+  <h2>Sign the challenge</h2>
+  <p>Run this command locally, with your operator key:</p>
+  <pre id="admin-sign-command"></pre>
+  <p><a id="admin-download-challenge" download="challenge.json">Download challenge.json</a></p>
+  <label for="admin-sig-file">Upload the resulting sig.json</label>
+  <input type="file" id="admin-sig-file" accept=".json">
+  <button id="admin-verify-signature">Verify</button>
+  <p class="error" id="admin-sign-error"></p>
+</section>
+
+<div id="admin-dashboard" hidden>
+
 <div class="tabs" role="tablist" aria-label="Admin sections">
   <button type="button" class="tab" id="tab-config" role="tab" data-tab="config" aria-selected="true" aria-controls="panel-config">Configuration</button>
   <button type="button" class="tab" id="tab-validators" role="tab" data-tab="validators" aria-selected="false" tabindex="-1" aria-controls="panel-validators">Validators</button>
@@ -117,6 +138,7 @@
   </dialog>
 </div>
 <p id="admin-error" class="error"></p>
+</div>
 </main>
 <script src="/admin.js"></script>
 </body>
