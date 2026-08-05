@@ -122,13 +122,22 @@ type Result struct {
 }
 ```
 
-`ValidateArchive` still reads the `gnoland.log.gz` entry through the same
-`io.LimitReader(tr, limit+1)` bound and still enforces the size limit and the
-gzip magic-byte check — it simply stops retaining the bytes past that check,
-so they become garbage the moment the loop iteration ends. Every existing
-structural guarantee (allowlisted names, no duplicates, regular files only,
-both entries present) is unchanged. It remains the sole validation gate; what
-follows is a read path, not a second gate.
+`ValidateArchive` still enforces the size limit and the gzip magic-byte check
+on `gnoland.log.gz`, but it stops materialising the entry to do so. Dropping
+the `Result` field alone would not have been enough: the entry was read with
+`io.ReadAll(io.LimitReader(tr, limit+1))`, so the whole thing was allocated
+just to measure it and inspect two bytes. That path becomes a fixed two-byte
+read for the magic check followed by a counted drain to `io.Discard` under the
+same `limit+1` bound — the boundary semantics are unchanged (exactly `limit`
+accepted, `limit+1` rejected), and so are the error messages, but peak memory
+for the log entry is now O(1) instead of O(`MaxLogSize`).
+
+`metadata.json` keeps its `io.ReadAll`: it is bounded to 64 KiB and its
+content is what the caller actually needs.
+
+Every existing structural guarantee (allowlisted names, no duplicates, regular
+files only, both entries present) is unchanged. `ValidateArchive` remains the
+sole validation gate; what follows is a read path, not a second gate.
 
 A new exported function opens the log as a stream:
 
