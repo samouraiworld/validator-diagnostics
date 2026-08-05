@@ -89,6 +89,16 @@ in memory for the whole request" for the same reason.
 No other Go changes are needed for this section; the flags already exist and
 are already wired through `muxDeps`.
 
+### `README.md`
+
+The flag table's `-max-log-size` row says "default 64 MiB. These bytes stay in
+memory for the whole request" — both halves change. The environment-variable
+table gains `MAX_UPLOAD_SIZE` and `MAX_LOG_SIZE` rows, noting they are read by
+`docker-compose.yml` and passed through as the corresponding flags (unlike the
+other rows, which the binary reads directly from the environment). The "Upload
+size and ClamAV" section already explains the `clamd.conf` coupling correctly
+and needs only to name `MAX_UPLOAD_SIZE` alongside `-max-upload-size`.
+
 ## 2. Streaming the log instead of buffering it
 
 The buffer turns out to be avoidable entirely, not merely shortenable.
@@ -327,12 +337,21 @@ guessing.
   non-gzip cases in particular must still behave identically, since they are
   what prove the stream bound and the best-effort error handling survived the
   signature change.
-- `portal/submit_test.go`: the end-to-end scoring test must still produce the
-  same `scoring.Result` through the streaming path. New cases: a submission
-  with an unconfigured exercise succeeds and records an unscored result
-  without opening the log; and — covering the `result.Scored` move — a
-  submission whose log cannot be opened is still stored and logged, with the
-  recorded result left unscored rather than scored-with-zeroes.
+- `portal/submit_test.go`: the two existing scoring tests
+  (`TestSubmitHandler_RecordsScoreWhenExerciseConfigured` and
+  `TestSubmitHandler_ScoresPendingWhenExerciseNotConfigured`) must pass
+  unchanged through the streaming path — they are the regression net for this
+  section, since they exercise the full handler end to end.
+
+  The `OpenLog`-failure branch is deliberately **not** covered here. Reaching
+  it would require `OpenLog` to fail on the very reader `ValidateArchive` just
+  accepted, which cannot happen through the handler — both read the same
+  seekable `multipart.File` under the same `Options`. Adding a test seam to
+  force it would put production indirection in place solely to reach an
+  unreachable branch. `OpenLog`'s error behavior is covered directly at the
+  unit level in `submission/archive_test.go` instead, and the branch remains
+  worth writing because it is what keeps `result.Scored` honest if the two
+  call sites ever diverge.
 - `go test ./...` for the whole repo; the frontend has no test harness, so
   the progress UI is verified manually against the large test archive
   (`test/samourai-crew-big-20260804-2059UTC.tar.gz`) with a real ClamAV scan
