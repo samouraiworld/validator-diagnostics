@@ -34,12 +34,23 @@ cp .env.example .env   # fill in REMOTE and ADMIN_OPERATOR_ADDRESSES at minimum
 docker compose up --build
 ```
 
-Same URLs as above (`http://localhost:8080/` and `http://localhost:8080/admin`).
+**The first `up` takes several extra minutes**, and looks like a hang: the
+clamav service downloads its ~1 GB signature database before it reports
+healthy, and the portal waits for that. Subsequent starts reuse the cached
+`clamav-data` volume and are fast.
+
+The URLs are the same as above, but on `PORTAL_PORT` rather than a fixed
+8080 — with the `.env.example` default that is `http://localhost:8080/`
+and `http://localhost:8080/admin`; set `PORTAL_PORT=8888` and it is
+`http://localhost:8888/` instead.
+
 Everything — the RPC endpoint, the admin operator address whitelist,
-storage credentials, and published port — is configured through `.env` (see
-[`.env.example`](.env.example) for the full list of variables and
-defaults). Uploaded archives and the submission log persist across
-`docker compose down` / `up` in named volumes.
+storage credentials, published port, and the upload size limits
+(`MAX_UPLOAD_SIZE` / `MAX_LOG_SIZE`, see
+[Upload size and ClamAV](#upload-size-and-clamav) before changing either) —
+is configured through `.env`. See [`.env.example`](.env.example) for the
+full list of variables and defaults. Uploaded archives and the submission
+log persist across `docker compose down` / `up` in named volumes.
 
 ### Flags and environment variables
 
