@@ -1,4 +1,4 @@
-# Upload Limits, Log Buffer Retention, and Upload Progress
+# Configurable Upload Limits, Streamed Log Scanning, and Upload Progress
 
 ## Overview
 
@@ -18,8 +18,9 @@ three together because they all live on the same upload path.
    carries the whole compressed `gnoland.log.gz` in memory from the moment
    `ValidateArchive` returns until the request ends — across the ClamAV scan
    and the S3 upload, which together can take minutes on a large archive —
-   even though the bytes are only read at the very end, by `scoring.AutoChecks`.
-   With no concurrency cap on `/submit`, worst-case memory is
+   even though the bytes are only read at the very end, by
+   `scoring.AutoChecks`, which streams them and never needed a slice in the
+   first place. With no concurrency cap on `/submit`, worst-case memory is
    `max-log-size × concurrent requests`, unbounded.
 
 3. **A large upload gives the validator no feedback.** `portal.js` posts the
@@ -27,9 +28,10 @@ three together because they all live on the same upload path.
    over a slow link, followed by a ClamAV scan that may take minutes, the page
    sits inert with no indication that anything is happening.
 
-Out of scope: a concurrency cap (semaphore) on `/submit`; client-side file
-size pre-checks; resumable or multipart uploads; serving the configured
-limits to the frontend dynamically.
+Out of scope: a concurrency cap (semaphore) on `/submit` — section 2 removes
+the per-request memory that would have motivated one; client-side file size
+pre-checks; resumable or multipart uploads; serving the configured limits to
+the frontend dynamically.
 
 ## 1. Configurable limits
 
@@ -45,9 +47,10 @@ in `.env`:
 MAX_UPLOAD_SIZE=2147483648
 
 # Maximum accepted size of the compressed gnoland.log.gz entry inside the
-# archive, in bytes. These bytes are read into memory to run the Phase 3
-# log-window scan, so raising this raises peak memory per concurrent
-# submission.
+# archive, in bytes. The entry is streamed, never buffered, so this costs
+# decompression time rather than memory — but see MAX_UPLOAD_SIZE, which
+# bounds the archive containing it, and scoring's own 1 GiB decompressed
+# scan budget.
 MAX_LOG_SIZE=268435456
 ```
 
@@ -71,16 +74,33 @@ predates this change.
 
 `defaultMaxLogSize` changes from `64 << 20` to `256 << 20`, so the flag
 default matches the compose default for anyone running the binary directly.
-Its doc comment is corrected while we're there: it currently claims
-`scoring.scanLogWindow` "will ever decompress" 8 MiB, but
-`scoring.maxLogScanBytes` is `1 << 30` (1 GiB). The revised comment states the
-real relationship — this cap bounds *compressed* bytes held in memory,
-`maxLogScanBytes` bounds *decompressed* bytes streamed during the scan.
+
+Its doc comment needs a full rewrite, not a value bump. It currently justifies
+the 64 MiB figure on memory grounds ("these bytes are held in memory for the
+whole request", "far more than the 8 MiB `scoring.scanLogWindow` will ever
+decompress") and both halves of that are wrong after this spec: section 2
+removes the buffering entirely, and `scoring.maxLogScanBytes` is `1 << 30`
+(1 GiB), not 8 MiB. The replacement comment states what the cap actually does
+now — bound the *compressed* bytes streamed out of the archive, with
+`maxLogScanBytes` as the separate bound on *decompressed* bytes read during
+the scan. The `-max-log-size` flag's usage string loses "these bytes are held
+in memory for the whole request" for the same reason.
 
 No other Go changes are needed for this section; the flags already exist and
 are already wired through `muxDeps`.
 
-## 2. Lazy log extraction
+## 2. Streaming the log instead of buffering it
+
+The buffer turns out to be avoidable entirely, not merely shortenable.
+`Result.LogGz` has exactly one consumer, and the first thing it does is turn
+the slice back into a stream: `gzip.NewReader(bytes.NewReader(logGz))`
+(`scoring/checks.go`). Nothing indexes it, measures it, or needs random
+access. So the buffer exists only to be converted back into what it already
+was on the way out of the tar reader.
+
+Removing it makes memory **O(1) regardless of `MAX_LOG_SIZE`**, which is a
+stronger result than deferring the allocation: the limit stops being a memory
+knob at all and becomes purely a decompression-time knob.
 
 ### `submission/archive.go`
 
@@ -97,68 +117,129 @@ type Result struct {
 gzip magic-byte check — it simply stops retaining the bytes past that check,
 so they become garbage the moment the loop iteration ends. Every existing
 structural guarantee (allowlisted names, no duplicates, regular files only,
-both entries present) is unchanged.
+both entries present) is unchanged. It remains the sole validation gate; what
+follows is a read path, not a second gate.
 
-A new exported function extracts the log on demand:
+A new exported function opens the log as a stream:
 
 ```go
-// ExtractLog re-reads the gnoland.log.gz entry out of r, which must be a
-// rewound reader over an archive ValidateArchive already accepted. It
-// exists so callers that need the log bytes (the scoring package) can hold
-// them only for as long as they use them, rather than for the whole
-// lifetime of the request — see the portal package's submit handler.
+// OpenLog walks r — which must be a rewound reader over an archive
+// ValidateArchive has already accepted — and returns a reader over the
+// gnoland.log.gz entry, bounded to opts.MaxLogSize. The bytes are never
+// buffered: callers stream them, so an archive at the size limit costs
+// decompression time rather than that much resident memory.
 //
-// It deliberately re-checks only what it must to return trustworthy bytes
-// (the size bound and the gzip magic bytes); the structural checks are
-// ValidateArchive's job and are not repeated.
-func ExtractLog(ctx context.Context, r io.Reader, opts Options) ([]byte, error)
+// The returned ReadCloser owns the underlying gzip reader; callers must
+// Close it. It is only valid until Close, and reading it consumes r.
+//
+// OpenLog does not re-run ValidateArchive's structural checks (allowed
+// names, duplicates, file types, required entries) — those are that
+// function's job and are not duplicated here. A missing log entry is
+// reported as an error rather than an empty stream, since for an archive
+// ValidateArchive accepted it can only mean the caller passed a different
+// reader.
+func OpenLog(ctx context.Context, r io.Reader, opts Options) (io.ReadCloser, error)
 ```
 
-`ExtractLog` walks the tar the same way, returns the bounded bytes for
-`LogFileName`, and errors if the entry is absent (which cannot happen for an
-archive `ValidateArchive` accepted, but is reported rather than returning
-nil). The bounded-read-and-check block is factored into a small unexported
-helper shared with `ValidateArchive` so the limit semantics (`limit+1`, then
-compare) exist in exactly one place.
+It builds the same `gzip.NewReader` + `tar.NewReader` pair, advances to
+`LogFileName`, and returns a `ReadCloser` wrapping
+`io.LimitReader(tr, opts.MaxLogSize)` whose `Close` closes the gzip reader.
+The tar reader's per-entry reader stays valid as long as `Next` isn't called
+again, which it isn't — so the returned stream reads straight through from
+the archive with no intermediate copy.
+
+Note the returned reader is bounded by `MaxLogSize` exactly (not `limit+1`):
+overflow detection is `ValidateArchive`'s job and has already happened by
+this point, so here the bound is pure defense in depth against a caller that
+skipped validation.
+
+### `scoring/checks.go`
+
+`AutoChecks` and `scanLogWindow` take an `io.Reader` instead of a `[]byte`:
+
+```go
+func AutoChecks(meta submission.Metadata, logGz io.Reader, cfg exercise.Config) (genesisMatch, versionSupported bool, window LogWindowCheck)
+
+func scanLogWindow(logGz io.Reader, cfg exercise.Config, budget int64) LogWindowCheck
+```
+
+The body change is one line — `gzip.NewReader(bytes.NewReader(logGz))` becomes
+`gzip.NewReader(logGz)` — which drops the `bytes` import, its only use in the
+file. Everything downstream (the `io.LimitedReader` budget, the
+`bufio.Scanner`, `scanHitCap`, the truncation semantics) already worked on
+streams and is untouched. The doc comments on both functions, which currently
+describe `logGz` as "submission.Result.LogGz — the same bounded bytes
+ValidateArchive already read", are updated to describe the
+`submission.OpenLog` stream instead, keeping the existing warning that this
+must not become a second independent read of the raw upload.
 
 ### `portal/submit.go`
 
 Inside the existing `if h.Exercise != nil` block, the `cfg.Configured()`
-branch changes from using `archiveResult.LogGz` to extracting on demand:
+branch opens the stream rather than reading a field:
 
 ```go
 if cfg.Configured() {
-	logGz, err := rewindAndExtractLog(r.Context(), file, h.ArchiveOptions)
+	genesisMatch, versionSupported, window, err := autoChecks(r.Context(), file, h.ArchiveOptions, metadata, cfg)
 	if err != nil {
 		log.Printf("scoring: unable to re-read log for %s: %v", header.Filename, err)
 	} else {
-		genesisMatch, versionSupported, window := scoring.AutoChecks(metadata, logGz, cfg)
-		// ... unchanged: result fields, TieredTimeScore, MetadataScore,
-		// LogQualityScore
+		result.Scored = true
+		// ... unchanged: GenesisMatch, VersionSupported, LogWindow,
+		// TieredTimeScore, MetadataScore, LogQualityScore
 	}
 }
 ```
 
-where `rewindAndExtractLog` is a small unexported helper in
-`portal/submit.go` that seeks `file` back to 0 and calls
-`submission.ExtractLog`, so the seek-then-extract pair reads as one step
-alongside the two `file.Seek(0, io.SeekStart)` calls already in the handler.
-Two consequences worth stating explicitly:
+`autoChecks` is a small unexported helper in `portal/submit.go` that seeks
+`file` back to 0, calls `submission.OpenLog`, `defer`s its `Close`, and
+forwards to `scoring.AutoChecks`. Keeping it a function rather than inlining
+the four steps is what makes the `defer Close` fire promptly, at the end of
+the scoring work, instead of at the end of the whole handler.
+
+Three consequences worth stating explicitly:
 
 - When the exercise is **not** configured for Phase 3 scoring, the log is
-  never extracted at all — the archive is validated, scanned, and stored
-  without the bytes ever being retained.
-- The extraction happens **after** `Store.Save`, so a failure here cannot
-  cost the validator a successful submission. It is logged and scoring is
-  skipped for that submission, matching how an `h.Exercise.Get()` failure is
-  already handled directly above.
+  never opened at all — the archive is validated, scanned, and stored without
+  a second pass over the entry.
+- This happens **after** `Store.Save`, so a failure here cannot cost the
+  validator a successful submission. It is logged and scoring is skipped for
+  that submission, matching how an `h.Exercise.Get()` failure is already
+  handled directly above.
+- `result.Scored` moves inside the success branch. Today it is set
+  unconditionally within `cfg.Configured()`; with a failure path that can
+  now skip the checks, a `Scored: true` record carrying zero-valued checks
+  would claim a submission was scored when it wasn't.
 
 ### Effect
 
-Peak retention of the (now up to 256 MiB) log buffer drops from "the entire
-request, including the AV scan and the S3 upload" to "a single scoring call
-near the end". The cost is one additional bounded gzip+tar pass over an
-already-seekable `multipart.File` — CPU and I/O, not memory.
+The log entry is never held in memory at any point in the request — not
+during the AV scan, not during the S3 upload, not during scoring. Worst-case
+memory for `/submit` no longer scales with `MAX_LOG_SIZE`, which is why no
+concurrency cap is needed to make raising that limit safe. The cost is one
+additional bounded gzip+tar pass over an already-seekable `multipart.File`:
+CPU and I/O, not memory.
+
+### Operational note: what actually binds if you want much larger logs
+
+`MAX_LOG_SIZE` alone does not decide whether a large log is accepted. Raising
+it toward, say, 2 GiB requires moving four other things, and this is the list
+to check before changing it:
+
+1. **`MAX_UPLOAD_SIZE`** — `gnoland.log.gz` is already compressed, so the
+   archive's outer gzip barely shrinks it. A 2 GiB log means a ~2 GiB upload,
+   which `http.MaxBytesReader` rejects first.
+2. **`clamd.conf`** — `StreamMaxLength`, `MaxFileSize`, and `MaxScanSize` are
+   all `2G`. The AV step fails closed (503), so exceeding these produces
+   "antivirus unavailable" rather than a clear size error.
+3. **`scoring.maxLogScanBytes`** — 1 GiB of *decompressed* plaintext. A
+   multi-GiB compressed log decompresses well past it, so the window scan
+   stops early and reports `Truncated`, costing partial credit on
+   `LogQualityScore`. This degrades quietly: the submission succeeds, the
+   score is just lower.
+4. **Disk** — the multipart form spills past 32 MiB to a temp file, and clamd
+   spools its own copy in `TemporaryDirectory`. Budget roughly twice the
+   archive size in free disk per concurrent submission.
 
 ## 3. Upload progress UI
 
@@ -232,16 +313,26 @@ guessing.
 
 ## Testing
 
-- `submission/archive_test.go`: existing assertions on `Result.LogGz` move to
-  `ExtractLog`. New cases: `ExtractLog` returns the same bytes
-  `ValidateArchive` accepted; it enforces `MaxLogSize`; it rejects a
-  non-gzip log entry; it errors when the entry is missing. Existing
+- `submission/archive_test.go`: the existing `Result.LogGz` assertions move to
+  `OpenLog`. New cases: `OpenLog` streams the same bytes the archive holds;
+  its reader is bounded by `MaxLogSize`; it errors when the log entry is
+  absent; `Close` is safe and the reader is unusable after it. Existing
   `ValidateArchive` structural tests are unchanged apart from no longer
-  reading `LogGz`.
+  reading `LogGz` — including the oversized-log and bad-magic-bytes cases,
+  which stay on `ValidateArchive` because that is still where those are
+  enforced.
+- `scoring/checks_test.go`: mechanical — the helpers that build a `logGz`
+  `[]byte` now wrap it in `bytes.NewReader` at the `AutoChecks` /
+  `scanLogWindow` call sites. Assertions are unchanged; the truncation and
+  non-gzip cases in particular must still behave identically, since they are
+  what prove the stream bound and the best-effort error handling survived the
+  signature change.
 - `portal/submit_test.go`: the end-to-end scoring test must still produce the
-  same `scoring.Result` through the new extraction path. New case: a
-  submission with an unconfigured exercise succeeds and records an unscored
-  result without extracting the log.
+  same `scoring.Result` through the streaming path. New cases: a submission
+  with an unconfigured exercise succeeds and records an unscored result
+  without opening the log; and — covering the `result.Scored` move — a
+  submission whose log cannot be opened is still stored and logged, with the
+  recorded result left unscored rather than scored-with-zeroes.
 - `go test ./...` for the whole repo; the frontend has no test harness, so
   the progress UI is verified manually against the large test archive
   (`test/samourai-crew-big-20260804-2059UTC.tar.gz`) with a real ClamAV scan
