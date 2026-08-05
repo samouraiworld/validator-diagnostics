@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gnolang/gno/tm2/pkg/crypto"
+	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/scoring"
 )
 
@@ -272,4 +274,78 @@ func TestAdminSubmissionsHandler_NilScoreWhenUnscored(t *testing.T) {
 	if len(submissions) != 1 || submissions[0].Score != nil {
 		t.Errorf("submissions = %+v, want Score == nil for an unscored entry", submissions)
 	}
+}
+
+func TestRequireAdminSession(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	sessions := auth.NewSessionSigner([]byte("test-secret"), time.Hour)
+
+	var whitelisted, other crypto.Address
+	copy(whitelisted[:], []byte("01234567890123456789")) // 20 bytes
+	copy(other[:], []byte("98765432109876543210"))        // 20 bytes
+
+	allowlist := map[string]bool{whitelisted.String(): true}
+	handler := RequireAdminSession(sessions, allowlist, inner)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	t.Run("no token", func(t *testing.T) {
+		resp, err := http.Get(srv.URL)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("expired token", func(t *testing.T) {
+		expiredSigner := auth.NewSessionSigner([]byte("test-secret"), -1*time.Minute)
+		token := expiredSigner.Issue(whitelisted)
+
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("valid session, non-whitelisted address", func(t *testing.T) {
+		token := sessions.Issue(other)
+
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status = %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("valid session, whitelisted address", func(t *testing.T) {
+		token := sessions.Issue(whitelisted)
+
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200 (request should reach the wrapped handler)", resp.StatusCode)
+		}
+	})
 }
