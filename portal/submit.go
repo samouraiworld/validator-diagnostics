@@ -208,7 +208,19 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			result := scoring.Result{SubmissionID: submissionID}
 			if cfg.Configured() {
-				genesisMatch, versionSupported, window, err := autoChecks(r.Context(), file, h.ArchiveOptions, metadata, cfg)
+				// The archive is already stored (Store.Save above) by
+				// the time this runs, so scoring is organizer-side
+				// work, not something the validator's own request
+				// should be able to cut short: a validator who closes
+				// their browser during the "server is scanning" phase
+				// — which the UI explicitly says can take several
+				// minutes — must not leave the archive stored but
+				// permanently unscored. WithoutCancel keeps
+				// request-scoped values but drops cancellation, so
+				// this call runs to completion regardless of client
+				// disconnect.
+				scoringCtx := context.WithoutCancel(r.Context())
+				genesisMatch, versionSupported, window, err := autoChecks(scoringCtx, file, h.ArchiveOptions, metadata, cfg)
 				if err != nil {
 					// The archive is already stored and the validator has
 					// their submission; a scoring read that fails here is
