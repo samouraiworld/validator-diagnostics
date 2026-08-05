@@ -13,12 +13,14 @@
 //
 // Required environment variables:
 //   - ADMIN_OPERATOR_ADDRESSES — comma-separated bech32 operator
-//     addresses allowed to authenticate against every admin route:
-//     /admin, /admin/submissions, /admin/exercise,
+//     addresses allowed to authenticate against every admin data route:
+//     /admin/submissions, /admin/exercise,
 //     /admin/submissions/{id}/score, /admin/submissions/{id} (DELETE),
-//     and /admin/summary. Admins sign in the same challenge-tx way
-//     validators do (see /auth/challenge, /auth/verify) — an address
-//     not in this list gets a 403 even with a valid signature.
+//     and /admin/summary. (GET /admin itself is unauthenticated: it is
+//     the sign-in page, and a browser navigating to it cannot attach an
+//     Authorization header.) Admins sign in the same challenge-tx way
+//     validators do (see /auth/challenge, /auth/admin/verify) — an
+//     address not in this list gets a 403 even with a valid signature.
 //   - SESSION_SECRET (optional) — hex-encoded HMAC secret for validator
 //     upload session tokens. If unset, a random one is generated for
 //     this run (sessions won't survive a restart — fine for a single
@@ -140,32 +142,85 @@ func main() {
 		log.Fatalf("unable to load embedded static assets: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/auth/challenge", auth.ChallengeHandler(nonces))
-	mux.Handle("/auth/verify", auth.VerifyHandler(verifier, sessions))
-	mux.Handle("/submit", &portal.SubmitHandler{
-		Sessions:      sessions,
-		Store:         store,
-		Log:           submissionLog,
-		AVScanner:     avScanner,
-		Exercise:      exerciseStore,
-		Scores:        scoresStore,
-		MaxUploadSize: *maxUploadSize,
-
+	mux := newMux(muxDeps{
+		Verifier:       verifier,
+		Nonces:         nonces,
+		Sessions:       sessions,
+		AdminSessions:  adminSessions,
+		AdminAllowlist: adminAllowlist,
+		Store:          store,
+		SubmissionLog:  submissionLog,
+		ExerciseStore:  exerciseStore,
+		ScoresStore:    scoresStore,
+		AVScanner:      avScanner,
+		MaxUploadSize:  *maxUploadSize,
 		ArchiveOptions: submission.Options{MaxLogSize: *maxLogSize},
+		StaticFS:       staticFS,
 	})
-	mux.Handle("/admin", portal.RequireAdminSession(adminSessions, adminAllowlist, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, staticFS, "admin.html")
-	})))
-	mux.Handle("/admin/submissions", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminSubmissionsHandler(submissionLog, scoresStore)))
-	mux.Handle("/admin/exercise", portal.RequireAdminSession(adminSessions, adminAllowlist, exercise.ConfigHandler(exerciseStore)))
-	mux.Handle("POST /admin/submissions/{id}/score", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminScoreHandler(submissionLog, scoresStore)))
-	mux.Handle("DELETE /admin/submissions/{id}", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminDeleteSubmissionHandler(submissionLog, store, scoresStore)))
-	mux.Handle("/admin/summary", portal.RequireAdminSession(adminSessions, adminAllowlist, portal.AdminSummaryHandler(submissionLog, exerciseStore, scoresStore)))
-	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
 	log.Printf("listening on %s, verifying operator pubkeys against %s", *addr, *remote)
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+// muxDeps groups every dependency newMux needs to wire the portal's
+// routes. Extracted from main() so the routing table itself — not just
+// individual middleware in isolation — can be exercised by a real HTTP
+// round trip in tests.
+type muxDeps struct {
+	Verifier       *auth.Verifier
+	Nonces         *auth.NonceStore
+	Sessions       *auth.SessionSigner
+	AdminSessions  *auth.SessionSigner
+	AdminAllowlist map[string]bool
+	Store          storage.Store
+	SubmissionLog  *portal.FileLog
+	ExerciseStore  *exercise.FileStore
+	ScoresStore    *scoring.Store
+	AVScanner      clamav.Scanner
+	MaxUploadSize  int64
+	ArchiveOptions submission.Options
+	StaticFS       fs.FS
+}
+
+// newMux builds the portal's routing table.
+//
+// Two things here are load-bearing and easy to break by accident:
+//
+//   - /auth/verify and /auth/admin/verify run the same verification
+//     logic but mint tokens with *different* signers, so a validator
+//     upload session can never be used as an admin session (and vice
+//     versa). The /auth/challenge endpoint is shared: nonces are
+//     single-use and address-bound regardless of which signer ends up
+//     consuming the resulting signature.
+//   - GET /admin is deliberately unauthenticated — it serves the admin
+//     sign-in page, which a browser cannot request with an
+//     Authorization header. Every /admin/* data route stays gated.
+func newMux(d muxDeps) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/auth/challenge", auth.ChallengeHandler(d.Nonces))
+	mux.Handle("/auth/verify", auth.VerifyHandler(d.Verifier, d.Sessions))
+	mux.Handle("/auth/admin/verify", auth.VerifyHandler(d.Verifier, d.AdminSessions))
+	mux.Handle("/submit", &portal.SubmitHandler{
+		Sessions:      d.Sessions,
+		Store:         d.Store,
+		Log:           d.SubmissionLog,
+		AVScanner:     d.AVScanner,
+		Exercise:      d.ExerciseStore,
+		Scores:        d.ScoresStore,
+		MaxUploadSize: d.MaxUploadSize,
+
+		ArchiveOptions: d.ArchiveOptions,
+	})
+	mux.Handle("/admin", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, d.StaticFS, "admin.html")
+	}))
+	mux.Handle("/admin/submissions", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminSubmissionsHandler(d.SubmissionLog, d.ScoresStore)))
+	mux.Handle("/admin/exercise", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, exercise.ConfigHandler(d.ExerciseStore)))
+	mux.Handle("POST /admin/submissions/{id}/score", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminScoreHandler(d.SubmissionLog, d.ScoresStore)))
+	mux.Handle("DELETE /admin/submissions/{id}", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminDeleteSubmissionHandler(d.SubmissionLog, d.Store, d.ScoresStore)))
+	mux.Handle("/admin/summary", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminSummaryHandler(d.SubmissionLog, d.ExerciseStore, d.ScoresStore)))
+	mux.Handle("/", http.FileServer(http.FS(d.StaticFS)))
+	return mux
 }
 
 func configureStore(uploadDir, s3Bucket, s3Region, s3Endpoint string) (storage.Store, error) {

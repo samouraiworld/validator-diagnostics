@@ -12,15 +12,17 @@ implementation status of every piece below.
 ```bash
 export PATH="/usr/local/go/bin:$PATH"   # if the Go toolchain isn't already on PATH
 
-ADMIN_PASSWORD=<choose-a-password> go run ./cmd/portal \
+ADMIN_OPERATOR_ADDRESSES=<comma-separated bech32 admin addresses> go run ./cmd/portal \
   -remote https://rpc.topaz.testnets.gno.land \
   -addr localhost:8080 \
   -upload-dir ./portal-uploads
 ```
 
 Then open `http://localhost:8080/` for the validator submission flow, and
-`http://localhost:8080/admin` (HTTP Basic Auth — any username, password =
-`ADMIN_PASSWORD`) for the live submissions dashboard.
+`http://localhost:8080/admin` for the live submissions dashboard — admins
+sign in the same challenge-tx way validators do (see
+[Admin endpoints](#admin-endpoints)), restricted to the addresses listed
+in `ADMIN_OPERATOR_ADDRESSES`.
 
 ### Docker (fastest way to start everything)
 
@@ -28,13 +30,13 @@ No Go toolchain or real AWS credentials needed — `docker compose` starts
 the portal, a local S3-compatible backend (MinIO), and ClamAV for malware scanning:
 
 ```bash
-cp .env.example .env   # fill in REMOTE and ADMIN_PASSWORD at minimum
+cp .env.example .env   # fill in REMOTE and ADMIN_OPERATOR_ADDRESSES at minimum
 docker compose up --build
 ```
 
 Same URLs as above (`http://localhost:8080/` and `http://localhost:8080/admin`).
-Everything — the RPC endpoint, admin password, storage credentials, and
-published port — is configured through `.env` (see
+Everything — the RPC endpoint, the admin operator address whitelist,
+storage credentials, and published port — is configured through `.env` (see
 [`.env.example`](.env.example) for the full list of variables and
 defaults). Uploaded archives and the submission log persist across
 `docker compose down` / `up` in named volumes.
@@ -46,6 +48,7 @@ defaults). Uploaded archives and the submission log persist across
 | `-remote` | yes | gno.land RPC endpoint used to verify operator public keys (e.g. `https://rpc.topaz.testnets.gno.land`) |
 | `-addr` | no | Address to listen on (default `localhost:8080`) |
 | `-session-ttl` | no | How long an issued session token stays valid (default `5m`) |
+| `-admin-session-ttl` | no | How long an issued admin session token stays valid (default `1h`) |
 | `-upload-dir` | one of `-upload-dir` / `-s3-bucket` | Local directory to save archives into |
 | `-s3-bucket` | one of `-upload-dir` / `-s3-bucket` | S3-compatible bucket to save archives into (AWS S3, Scaleway, Cloudflare R2, ...) |
 | `-s3-region` | with `-s3-bucket` | S3-compatible region |
@@ -60,8 +63,9 @@ defaults). Uploaded archives and the submission log persist across
 
 | Environment variable | Required | Description |
 |-----------------------|----------|-------------|
-| `ADMIN_PASSWORD` | yes | Protects every `/admin*` route (HTTP Basic Auth, any username) |
+| `ADMIN_OPERATOR_ADDRESSES` | yes | Comma-separated bech32 operator addresses allowed to authenticate against the admin dashboard. Admins sign in the same challenge-tx way validators do (`/auth/challenge`, `/auth/admin/verify`) — an address not in this list gets a 403 even with a valid signature. Replaces the old `ADMIN_PASSWORD` Basic Auth; existing deployments must set this before upgrading or the portal will refuse to start |
 | `SESSION_SECRET` | no | Hex-encoded HMAC secret for session tokens. If unset, a random one is generated for the run — fine for a single exercise, not for a long-lived deployment (sessions won't survive a restart) |
+| `ADMIN_SESSION_SECRET` | no | Hex-encoded HMAC secret for admin session tokens, kept separate from `SESSION_SECRET` so restarting the portal or rotating one secret doesn't affect the other session type. If unset, a random one is generated for the run |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | with `-s3-bucket` | Credentials for the S3-compatible backend |
 
 ### Upload size and ClamAV
@@ -88,8 +92,11 @@ turn the setting off.
 
 ### Admin endpoints
 
-All of these sit behind `ADMIN_PASSWORD` (HTTP Basic Auth) and are driven
-by the dashboard at `/admin`; the `POST` routes accept
+All of these (except `GET /admin` itself, which serves the sign-in screen
+and contains no data) sit behind operator-address-whitelist auth: admins
+sign in via `POST /auth/challenge` + `POST /auth/admin/verify`, the same
+challenge-tx flow validators use, restricted to the addresses in
+`ADMIN_OPERATOR_ADDRESSES`. The `POST` routes accept
 `Content-Type: application/json` only.
 
 | Route | Purpose |

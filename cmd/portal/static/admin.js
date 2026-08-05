@@ -3,7 +3,7 @@
 let adminSessionToken = null;
 let adminCurrentNonce = null;
 let adminCurrentOperatorAddress = null;
-let refreshIntervalStarted = false;
+let refreshIntervalId = null;
 
 function setError(id, message) {
   document.getElementById(id).textContent = message || "";
@@ -26,6 +26,14 @@ async function parseJSONResponse(resp) {
 // blank on the very first page load.
 function showLogin(message) {
   adminSessionToken = null;
+  // Stop the dashboard poll: left running, it would fire another
+  // unauthenticated refresh every 5s and re-run showLogin(), wiping the
+  // sign-in form out from under an admin part-way through signing a
+  // fresh challenge.
+  if (refreshIntervalId !== null) {
+    clearInterval(refreshIntervalId);
+    refreshIntervalId = null;
+  }
   document.getElementById("admin-dashboard").hidden = true;
   document.getElementById("admin-step-address").hidden = false;
   document.getElementById("admin-step-sign").hidden = true;
@@ -51,15 +59,15 @@ async function adminFetch(url, options = {}) {
 // verification — including a re-login after a session expired or the
 // operator was dropped from the whitelist — so the initial refresh()
 // and loadExerciseConfig() always run again on re-entry rather than
-// leaving stale data on screen. refreshIntervalStarted only guards the
-// setInterval below, which should keep running from the first login
-// and never be duplicated by a later one.
+// leaving stale data on screen. refreshIntervalId tracks the periodic
+// poll below: showLogin() stops it on logout/expiry, and this restarts
+// it per login, so exactly one poll is live while the dashboard is up
+// and none while the sign-in screen is.
 function startDashboard() {
   refresh();
   loadExerciseConfig();
-  if (!refreshIntervalStarted) {
-    refreshIntervalStarted = true;
-    setInterval(() => refresh(), 5000);
+  if (refreshIntervalId === null) {
+    refreshIntervalId = setInterval(() => refresh(), 5000);
   }
 }
 
@@ -129,7 +137,7 @@ document.getElementById("admin-verify-signature").addEventListener("click", asyn
 
   let resp;
   try {
-    resp = await fetch("/auth/verify", {
+    resp = await fetch("/auth/admin/verify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
