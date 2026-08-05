@@ -1,16 +1,26 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gnolang/gno/tm2/pkg/crypto"
+	"github.com/gnolang/gno/tm2/pkg/crypto/keys"
 	"github.com/samourai/validator-diagnostics/auth"
+	"github.com/samourai/validator-diagnostics/clamav"
+	"github.com/samourai/validator-diagnostics/exercise"
 	"github.com/samourai/validator-diagnostics/portal"
 	"github.com/samourai/validator-diagnostics/scoring"
 	"github.com/samourai/validator-diagnostics/storage"
+	"github.com/samourai/validator-diagnostics/submission"
 )
 
 // TestDeleteSubmissionRouteRequiresAdminAuth guards the one line in
@@ -45,6 +55,161 @@ func TestDeleteSubmissionRouteRequiresAdminAuth(t *testing.T) {
 
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (unauthenticated request must be rejected)", resp.StatusCode)
+	}
+}
+
+// TestNewMux_AdminLoginRoundTrip exercises the real routing table built
+// by newMux — the same one main() serves — end to end: an admin signs
+// in via the actual /auth/challenge + /auth/admin/verify endpoints with
+// a real signature, and the resulting token must authenticate against a
+// real /admin/* route. It also asserts /admin itself is reachable with
+// no session (it's the sign-in page), and that a validator-flow session
+// token (issued by the *other* SessionSigner) must NOT authenticate
+// against admin routes — the whole point of keeping the two signers
+// separate.
+func TestNewMux_AdminLoginRoundTrip(t *testing.T) {
+	// Same fixed, publicly-known test mnemonic gno itself uses in
+	// tm2/pkg/crypto/keys/keybase_test.go (see also auth/challenge_test.go) —
+	// not a real key.
+	const testMnemonic = `lounge napkin all odor tilt dove win inject sleep jazz uncover traffic hint require cargo arm rocket round scan bread report squirrel step lake`
+
+	kb := keys.NewInMemory()
+	info, err := kb.CreateAccount("admin-operator", testMnemonic, "", "password", 0, 0)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	operatorAddr := info.GetAddress()
+
+	nonces := auth.NewNonceStore()
+	verifier := &auth.Verifier{
+		Nonces: nonces,
+		FetchPubKey: func(ctx context.Context, addr crypto.Address) (crypto.PubKey, error) {
+			return info.GetPubKey(), nil
+		},
+	}
+
+	sessions := auth.NewSessionSigner([]byte("test-validator-secret"), 5*time.Minute)
+	adminSessions := auth.NewSessionSigner([]byte("test-admin-secret"), time.Hour)
+	allowlist := map[string]bool{operatorAddr.String(): true}
+
+	fileLog := portal.NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+	store := storage.LocalStore{Dir: t.TempDir()}
+
+	staticFS, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+
+	mux := newMux(muxDeps{
+		Verifier:       verifier,
+		Nonces:         nonces,
+		Sessions:       sessions,
+		AdminSessions:  adminSessions,
+		AdminAllowlist: allowlist,
+		Store:          store,
+		SubmissionLog:  fileLog,
+		ExerciseStore:  exerciseStore,
+		ScoresStore:    scoresStore,
+		AVScanner:      clamav.NoopScanner{},
+		MaxUploadSize:  defaultMaxUploadSize,
+		ArchiveOptions: submission.Options{MaxLogSize: defaultMaxLogSize},
+		StaticFS:       staticFS,
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// GET /admin must be reachable with no session at all (it's the
+	// login page itself — the regression this test exists to catch).
+	resp, err := http.Get(srv.URL + "/admin")
+	if err != nil {
+		t.Fatalf("GET /admin: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin status = %d, want 200 (the admin login page must be reachable without a session)", resp.StatusCode)
+	}
+
+	// 1. Get a challenge.
+	challengeReq, _ := json.Marshal(map[string]string{"operator_address": operatorAddr.String()})
+	resp, err = http.Post(srv.URL+"/auth/challenge", "application/json", bytes.NewReader(challengeReq))
+	if err != nil {
+		t.Fatalf("POST /auth/challenge: %v", err)
+	}
+	defer resp.Body.Close()
+	var challenge struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&challenge); err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	if challenge.Nonce == "" {
+		t.Fatal("expected non-empty nonce")
+	}
+
+	// 2. Sign it exactly as gnokey sign would.
+	tx := auth.NewChallengeTx(operatorAddr, challenge.Nonce)
+	signBytes, err := auth.SignBytes(tx)
+	if err != nil {
+		t.Fatalf("SignBytes: %v", err)
+	}
+	sig, _, err := kb.Sign("admin-operator", "password", signBytes)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	// 3. Verify against the ADMIN endpoint specifically — this is the
+	// regression this test exists to catch: an admin session token must
+	// come from /auth/admin/verify (signed with adminSessions), not the
+	// validator flow's /auth/verify (signed with sessions).
+	verifyReq, _ := json.Marshal(map[string]string{
+		"operator_address": operatorAddr.String(),
+		"nonce":            challenge.Nonce,
+		"signature":        base64.StdEncoding.EncodeToString(sig),
+	})
+	resp, err = http.Post(srv.URL+"/auth/admin/verify", "application/json", bytes.NewReader(verifyReq))
+	if err != nil {
+		t.Fatalf("POST /auth/admin/verify: %v", err)
+	}
+	defer resp.Body.Close()
+	var verifyResp struct {
+		OK           bool   `json:"ok"`
+		SessionToken string `json:"session_token"`
+		Error        string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&verifyResp); err != nil {
+		t.Fatalf("decode verify response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !verifyResp.OK {
+		t.Fatalf("admin verify failed: status=%d ok=%v err=%q", resp.StatusCode, verifyResp.OK, verifyResp.Error)
+	}
+
+	// 4. The returned token must actually authenticate against a real
+	// admin route.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/submissions", nil)
+	req.Header.Set("Authorization", "Bearer "+verifyResp.SessionToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /admin/submissions: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/submissions with admin token: status = %d, want 200", resp.StatusCode)
+	}
+
+	// 5. The validator upload session signer must NOT authenticate
+	// against admin routes (secret separation must actually hold).
+	otherToken := sessions.Issue(operatorAddr)
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/submissions", nil)
+	req2.Header.Set("Authorization", "Bearer "+otherToken)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET /admin/submissions (validator token): %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /admin/submissions with a validator-flow token: status = %d, want 401 (validator and admin sessions must not cross-authenticate)", resp2.StatusCode)
 	}
 }
 

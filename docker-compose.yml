@@ -61,7 +61,8 @@ services:
       clamav:
         condition: service_healthy
     environment:
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_OPERATOR_ADDRESSES: ${ADMIN_OPERATOR_ADDRESSES}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
       S3_ACCESS_KEY: ${MINIO_ROOT_USER}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
