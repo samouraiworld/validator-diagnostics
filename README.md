@@ -59,7 +59,7 @@ defaults). Uploaded archives and the submission log persist across
 | `-clamav-addr` | no (recommended) | clamd address to scan uploads against — `host:port`, or `unix:/path/to/socket`. Unset disables scanning: fine for local dev, **not** for production |
 | `-clamav-timeout` | no | Time budget for one clamd scan, dial included (default `15m`). Must cover streaming a whole `-max-upload-size` archive to clamd |
 | `-max-upload-size` | no | Maximum accepted upload, in bytes (default 2 GiB). Keep it at or below clamd's `StreamMaxLength` — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `-max-log-size` | no | Maximum accepted size of the `gnoland.log.gz` entry inside the archive, in bytes (default 64 MiB). These bytes stay in memory for the whole request |
+| `-max-log-size` | no | Maximum accepted size of the `gnoland.log.gz` entry inside the archive, in bytes (default 256 MiB). The entry is streamed, not buffered, so this bounds decompression work rather than memory |
 
 | Environment variable | Required | Description |
 |-----------------------|----------|-------------|
@@ -67,6 +67,8 @@ defaults). Uploaded archives and the submission log persist across
 | `SESSION_SECRET` | no | Hex-encoded HMAC secret for session tokens. If unset, a random one is generated for the run — fine for a single exercise, not for a long-lived deployment (sessions won't survive a restart) |
 | `ADMIN_SESSION_SECRET` | no | Hex-encoded HMAC secret for admin session tokens, kept separate from `SESSION_SECRET` so restarting the portal or rotating one secret doesn't affect the other session type. If unset, a random one is generated for the run |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | with `-s3-bucket` | Credentials for the S3-compatible backend |
+| `MAX_UPLOAD_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-upload-size` (default 2 GiB). Unlike the other variables here, the binary does not read it directly. Must stay at or below clamd's `StreamMaxLength` — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 256 MiB). Not read directly by the binary either |
 
 ### Upload size and ClamAV
 
@@ -78,8 +80,9 @@ what this portal accepts, so the two limits have to agree or real uploads
 get rejected with a 503.
 
 `clamd.conf` (bind-mounted by `docker-compose.yml`) raises clamd's stream
-and file limits to **2 GiB**, matching `-max-upload-size`'s default.
-Change one and you must change the other.
+and file limits to **2 GiB**, matching `-max-upload-size`'s default (set
+via `MAX_UPLOAD_SIZE` in `.env` under Docker Compose). Change one and you
+must change the other.
 
 It also sets `AlertExceedsMax yes`, which is what stops the AV layer from
 failing *open*. By default clamd silently skips content that exceeds

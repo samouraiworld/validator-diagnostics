@@ -69,16 +69,20 @@ var staticFiles embed.FS
 const defaultMaxUploadSize = 2 << 30 // 2 GiB
 
 // defaultMaxLogSize caps the gnoland.log.gz entry inside the archive.
-// submission's own default is 2 GiB, which was harmless while those
-// bytes were freed as soon as ValidateArchive returned — but Phase 3
-// keeps them alive through the AV scan and the upload to storage, so
-// they now cost up to that much resident memory per concurrent request.
-// 64 MiB of gzip is on the order of a gigabyte of plaintext log, far
-// more than the 8 MiB scoring.scanLogWindow will ever decompress, while
-// keeping per-request retention bounded. Raise it with -max-log-size if
-// real submissions ever bump into it (they are rejected with a clear
-// message when they do).
-const defaultMaxLogSize = 64 << 20 // 64 MiB
+// submission's own default is 2 GiB; this deployment standardises lower so
+// one submission cannot tie up an unbounded amount of decompression work.
+//
+// The entry is streamed and never buffered (see submission.OpenLog), so
+// this bounds *compressed* bytes read out of the archive rather than
+// resident memory. The separate bound on *decompressed* bytes is
+// scoring.maxLogScanBytes (1 GiB), which is what stops a small upload from
+// expanding without limit during the log-window scan.
+//
+// 256 MiB is roughly 2.5x the largest real submission seen so far. Raise it
+// with -max-log-size (MAX_LOG_SIZE in .env) if real submissions bump into
+// it — they are rejected with a clear message when they do. README.md's
+// "Upload size and ClamAV" lists what else has to move with it.
+const defaultMaxLogSize = 256 << 20 // 256 MiB
 
 func main() {
 	remote := flag.String("remote", "", "gno.land RPC endpoint to verify operator pubkeys against, e.g. https://rpc.test13.testnets.gno.land:443")
@@ -95,7 +99,7 @@ func main() {
 	clamavAddr := flag.String("clamav-addr", "", "clamd address to scan uploads against (host:port, or unix:/path/to/socket); leave empty to disable AV scanning (NOT recommended for production)")
 	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; must comfortably cover streaming a whole -max-upload-size archive to clamd")
 	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; keep this <= clamd's StreamMaxLength (see clamd.conf) or scannable uploads will be rejected with 503")
-	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of the gnoland.log.gz entry inside the archive; these bytes are held in memory for the whole request")
+	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of the gnoland.log.gz entry inside the archive; the entry is streamed rather than buffered, so this bounds decompression work rather than memory")
 	flag.Parse()
 
 	if *remote == "" {
