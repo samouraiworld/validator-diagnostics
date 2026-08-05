@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/samourai/validator-diagnostics/auth"
 	"github.com/samourai/validator-diagnostics/scoring"
 )
 
@@ -19,6 +20,28 @@ func AdminAuth(password string, next http.Handler) http.Handler {
 		if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="validator-fire-drill-admin"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireAdminSession wraps next, accepting only requests bearing a
+// valid admin session token (see auth.RequireSession) whose bound
+// operator address is present in allowlist. allowlist keys are bech32
+// address strings (crypto.Address.String()) — the same identity/session
+// machinery the validator upload flow uses, restricted to a fixed set
+// of admin addresses.
+func RequireAdminSession(sessions *auth.SessionSigner, allowlist map[string]bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		addr, err := auth.RequireSession(sessions, r)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !allowlist[addr.String()] {
+			log.Printf("admin: rejected non-whitelisted operator address %s", addr)
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
