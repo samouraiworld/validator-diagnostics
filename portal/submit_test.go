@@ -84,19 +84,21 @@ func (f fakeScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, err
 	return f.verdict, f.err
 }
 
-// buildValidArchive is buildArchiveWithLog carrying a genuinely
-// decompressible gnoland.log.gz. The AV pass reads that stream now, so the
-// hand-rolled two-magic-bytes stand-in this used to write would be rejected
-// as an unreadable log rather than exercising the happy path.
 func buildValidArchive(t *testing.T, validatorAddress string) []byte {
 	t.Helper()
 	return buildArchiveWithLog(t, validatorAddress, gzipBytes(t, []byte("fake gzip log payload")))
 }
 
-// buildArchiveWithLog builds the same archive with the gnoland.log.gz
+// buildArchiveWithLog builds the archive with the validator.log.gz
 // entry's raw bytes under the caller's control, so a test can supply a
-// broken or truncated gzip.
+// broken or truncated gzip, and no sentry log.
 func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byte) []byte {
+	t.Helper()
+	return buildArchiveWithLogs(t, validatorAddress, logContent, nil)
+}
+
+// buildArchiveWithLogs adds sentry.log.gz when sentryContent is non-nil.
+func buildArchiveWithLogs(t *testing.T, validatorAddress string, logContent, sentryContent []byte) []byte {
 	t.Helper()
 
 	metadata := []byte(`{
@@ -114,17 +116,26 @@ func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byt
 		"recent_operations": "None"
 	}`)
 
+	entries := []struct {
+		name    string
+		content []byte
+	}{{"validator.log.gz", logContent}}
+	if sentryContent != nil {
+		entries = append(entries, struct {
+			name    string
+			content []byte
+		}{"sentry.log.gz", sentryContent})
+	}
+	entries = append(entries, struct {
+		name    string
+		content []byte
+	}{"metadata.json", metadata})
+
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
 
-	for _, e := range []struct {
-		name    string
-		content []byte
-	}{
-		{"validator.log.gz", logContent},
-		{"metadata.json", metadata},
-	} {
+	for _, e := range entries {
 		hdr := &tar.Header{Name: e.name, Typeflag: tar.TypeReg, Size: int64(len(e.content)), Mode: 0o644}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatalf("WriteHeader: %v", err)
@@ -731,6 +742,123 @@ func TestSubmitHandler_ScoresPendingWhenExerciseNotConfigured(t *testing.T) {
 	}
 	if result.Scored {
 		t.Error("Scored = true, want false when the exercise wasn't configured at submit time")
+	}
+}
+
+// scoringHarness wires a handler with a configured exercise, and knows
+// how to build a log whose timestamps bracket that exercise's
+// investigation window.
+type scoringHarness struct {
+	handler  *SubmitHandler
+	sessions *auth.SessionSigner
+	log      *fakeLog
+	scores   *scoring.Store
+	cfg      exercise.Config
+}
+
+func newScoringHarness(t *testing.T) *scoringHarness {
+	t.Helper()
+
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	submissionLog := &fakeLog{}
+
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	cfg := exercise.Config{
+		// A 4h announce-to-deadline window with AnnouncedAt just a
+		// minute in the past keeps "submit now" well inside the first
+		// quarter, regardless of how long the test takes to run.
+		AnnouncedAt:              time.Now().UTC().Add(-time.Minute),
+		DeadlineAt:               time.Now().UTC().Add(4 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
+	}
+	if err := exerciseStore.Set(cfg); err != nil {
+		t.Fatalf("exerciseStore.Set: %v", err)
+	}
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	return &scoringHarness{
+		handler: &SubmitHandler{
+			Sessions: sessions,
+			Store:    newFakeStore(),
+			Log:      submissionLog,
+			Exercise: exerciseStore,
+			Scores:   scoresStore,
+		},
+		sessions: sessions,
+		log:      submissionLog,
+		scores:   scoresStore,
+		cfg:      cfg,
+	}
+}
+
+// submit posts archive and returns the scoring record written for it.
+func (h *scoringHarness) submit(t *testing.T, addr crypto.Address, archive []byte) scoring.Result {
+	t.Helper()
+
+	if status := submitArchive(t, h.handler, h.sessions, addr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	h.log.mu.Lock()
+	id := h.log.entries[0].ID
+	h.log.mu.Unlock()
+
+	result, ok, err := h.scores.Get(id)
+	if err != nil {
+		t.Fatalf("scores.Get: %v", err)
+	}
+	if !ok || !result.Scored {
+		t.Fatalf("result = %+v, ok = %v, want a Scored result", result, ok)
+	}
+	return result
+}
+
+// coveringLog returns a gzipped log whose timestamps bracket the
+// harness's investigation window on both sides, so the window scan
+// reports Covered.
+func (h *scoringHarness) coveringLog(t *testing.T) []byte {
+	t.Helper()
+
+	lines := h.cfg.InvestigationWindowStart.Add(-time.Hour).Format(time.RFC3339) + " started\n" +
+		h.cfg.InvestigationWindowEnd.Add(time.Hour).Format(time.RFC3339) + " still running\n"
+	return gzipBytes(t, []byte(lines))
+}
+
+func TestSubmitHandler_ScoresASubmittedSentryLog(t *testing.T) {
+	h := newScoringHarness(t)
+	addr := testOperatorAddr()
+	logContent := h.coveringLog(t)
+
+	result := h.submit(t, addr, buildArchiveWithLogs(t, addr.String(), logContent, logContent))
+
+	if !result.SentryLogPresent {
+		t.Error("SentryLogPresent = false, want true")
+	}
+	if !result.SentryLogWindow.Covered {
+		t.Errorf("SentryLogWindow = %+v, want Covered", result.SentryLogWindow)
+	}
+	if result.LogQualityScore != 25 {
+		t.Errorf("LogQualityScore = %d, want 25 (13 base + 8 validator + 4 sentry)", result.LogQualityScore)
+	}
+}
+
+func TestSubmitHandler_CapsLogQualityWithoutASentryLog(t *testing.T) {
+	h := newScoringHarness(t)
+	addr := testOperatorAddr()
+
+	result := h.submit(t, addr, buildArchiveWithLogs(t, addr.String(), h.coveringLog(t), nil))
+
+	if result.SentryLogPresent {
+		t.Error("SentryLogPresent = true, want false")
+	}
+	if result.SentryLogWindow.Detected {
+		t.Errorf("SentryLogWindow = %+v, want the zero value when no sentry log was submitted", result.SentryLogWindow)
+	}
+	if result.LogQualityScore != 21 {
+		t.Errorf("LogQualityScore = %d, want 21 (13 base + 8 for the covered validator log)", result.LogQualityScore)
 	}
 }
 

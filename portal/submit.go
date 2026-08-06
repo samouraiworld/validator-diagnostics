@@ -281,7 +281,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// this call runs to completion regardless of client
 				// disconnect.
 				scoringCtx := context.WithoutCancel(r.Context())
-				genesisMatch, versionSupported, window, err := autoChecks(scoringCtx, file, h.ArchiveOptions, metadata, cfg)
+				genesisMatch, versionSupported, windows, err := autoChecks(scoringCtx, file, h.ArchiveOptions, metadata, cfg)
 				if err != nil {
 					// The archive is already stored and the validator has
 					// their submission; a scoring read that fails here is
@@ -298,7 +298,9 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					result.Scored = true
 					result.GenesisMatch = genesisMatch
 					result.VersionSupported = versionSupported
-					result.LogWindow = window
+					result.LogWindow = windows.validator
+					result.SentryLogPresent = archiveResult.SentryLogPresent
+					result.SentryLogWindow = windows.sentry
 					result.UploadTimeScore = scoring.TieredTimeScore(recordedAt, cfg)
 					// Always 25: ValidateMetadata above already gated this
 					// submission on a schema-valid metadata.json, so by the
@@ -306,7 +308,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// structurally satisfied — see scoring.LogQualityScore's
 					// doc comment for the analogous reasoning on log quality.
 					result.MetadataScore = 25
-					result.LogQualityScore = scoring.LogQualityScore(window, scoring.LogWindowCheck{})
+					result.LogQualityScore = scoring.LogQualityScore(windows.validator, windows.sentry)
 				}
 			}
 			if h.Scores != nil {
@@ -348,28 +350,43 @@ func writeSubmitResult(w http.ResponseWriter, status int, resp submitResponse) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// autoChecks runs the Phase 3 automatic checks against the log entry inside
-// file, streaming it straight out of the archive rather than holding it in
-// memory. file must be the already-validated upload; it is rewound first,
-// so callers must not rely on its offset afterwards.
+// logWindows carries one window check per log entry. A struct rather
+// than two more return values: autoChecks already returns four things,
+// and the two windows are read together everywhere they are read at all.
+type logWindows struct {
+	validator scoring.LogWindowCheck
+	sentry    scoring.LogWindowCheck
+}
+
+// autoChecks runs the Phase 3 automatic checks against the log entries
+// inside file, streaming each straight out of the archive rather than
+// holding it in memory. file must be the already-validated upload; it is
+// rewound first, so callers must not rely on its offset afterwards.
 //
-// This is a function rather than four inline statements so the stream is
-// closed as soon as the checks are done, rather than at the end of the
-// whole request.
-func autoChecks(ctx context.Context, file io.ReadSeeker, opts submission.Options, meta submission.Metadata, cfg exercise.Config) (genesisMatch, versionSupported bool, window scoring.LogWindowCheck, err error) {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return false, false, scoring.LogWindowCheck{}, fmt.Errorf("rewinding upload: %w", err)
-	}
-
-	logGz, err := submission.OpenLog(ctx, file, opts)
-	if err != nil {
-		return false, false, scoring.LogWindowCheck{}, err
-	}
-	defer logGz.Close()
-
+// One ScanLogs walk covers both logs. Opening them separately would
+// decompress the outer gzip once per entry, over an archive that may run
+// to gigabytes.
+func autoChecks(ctx context.Context, file io.ReadSeeker, opts submission.Options, meta submission.Metadata, cfg exercise.Config) (genesisMatch, versionSupported bool, windows logWindows, err error) {
 	genesisMatch, versionSupported = scoring.MetadataChecks(meta, cfg)
-	window = scoring.ScanLogWindow(logGz, cfg)
-	return genesisMatch, versionSupported, window, nil
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, false, logWindows{}, fmt.Errorf("rewinding upload: %w", err)
+	}
+
+	err = submission.ScanLogs(ctx, file, opts, func(name string, logGz io.Reader) error {
+		switch name {
+		case submission.ValidatorLogFileName:
+			windows.validator = scoring.ScanLogWindow(logGz, cfg)
+		case submission.SentryLogFileName:
+			windows.sentry = scoring.ScanLogWindow(logGz, cfg)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, false, logWindows{}, err
+	}
+
+	return genesisMatch, versionSupported, windows, nil
 }
 
 // errUnreadableLog marks a gnoland.log.gz whose gzip stream could not be
