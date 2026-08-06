@@ -69,8 +69,8 @@ log persist across `docker compose down` / `up` in named volumes.
 | `-scores-path` | no | Path to the scoring records file (default `./scores.json`) |
 | `-clamav-addr` | no (recommended) | clamd address to scan uploads against — `host:port`, or `unix:/path/to/socket`. Unset disables scanning: fine for local dev, **not** for production |
 | `-clamav-timeout` | no | Time budget for one clamd scan, dial included (default `15m`). Bounds a single scan window now (at most 1 GiB, roughly 7s at the measured rate), not the whole upload |
-| `-max-upload-size` | no | Maximum accepted upload, in bytes (default 2147483647 — a legacy value, not a scan limit: clamd never sees more than one 1 GiB window at a time now). Raising it is a disk/S3/time question — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `-max-log-size` | no | Maximum accepted size of the `gnoland.log.gz` entry inside the archive, in bytes (default 256 MiB). The entry is streamed, not buffered, so this bounds decompression work rather than memory |
+| `-max-upload-size` | no | Maximum accepted upload, in bytes (default 4294967296 — 4 GiB. Not a scan limit: clamd never sees more than one 1 GiB window at a time). Raising it is a disk/S3/time question — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `-max-log-size` | no | Maximum accepted size of the `gnoland.log.gz` entry inside the archive, in bytes (default 4294967296 — 4 GiB). The entry is streamed, not buffered, so this bounds decompression work rather than memory |
 | `-av-scan-budget` | no | Maximum decompressed bytes of `gnoland.log.gz` the antivirus examines per submission (default 34359738368 — 32 GiB). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
 
 | Environment variable | Required | Description |
@@ -79,8 +79,8 @@ log persist across `docker compose down` / `up` in named volumes.
 | `SESSION_SECRET` | no | Hex-encoded HMAC secret for session tokens. If unset, a random one is generated for the run — fine for a single exercise, not for a long-lived deployment (sessions won't survive a restart) |
 | `ADMIN_SESSION_SECRET` | no | Hex-encoded HMAC secret for admin session tokens, kept separate from `SESSION_SECRET` so restarting the portal or rotating one secret doesn't affect the other session type. If unset, a random one is generated for the run |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | with `-s3-bucket` | Credentials for the S3-compatible backend |
-| `MAX_UPLOAD_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-upload-size` (default 2147483647 — a legacy value now: clamd never sees more than one 1 GiB scan window at a time, so raising this is a disk/S3/time question instead). Unlike the other variables here, the binary does not read it directly — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 256 MiB). Not read directly by the binary either. Bounds the *compressed* entry; the antivirus no longer caps the decompressed size — that's `AV_SCAN_BUDGET` (coverage) and `scoring.maxLogWindowBytes` (partial credit for automatic scoring only) — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `MAX_UPLOAD_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-upload-size` (default 4294967296 — 4 GiB: clamd never sees more than one 1 GiB scan window at a time, so raising this is a disk/S3/time question instead). Unlike the other variables here, the binary does not read it directly — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 4294967296 — 4 GiB). Not read directly by the binary either. Bounds the *compressed* entry; the antivirus no longer caps the decompressed size — that's `AV_SCAN_BUDGET` (coverage) and `scoring.maxLogWindowBytes` (partial credit for automatic scoring only) — see [Upload size and ClamAV](#upload-size-and-clamav) |
 | `AV_SCAN_BUDGET` | no | Read by `docker-compose.yml` and passed through as `-av-scan-budget` (default 34359738368, i.e. 32 GiB of decompressed log bytes). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
 
 ### Upload size and ClamAV
@@ -97,6 +97,21 @@ submission and stores nothing.
 and file limits to **2147483647 bytes — 2 GiB minus one**. That is
 headroom for one window plus its overlap, not a bound tied to
 `-max-upload-size` / `MAX_UPLOAD_SIZE` — the two no longer have to agree.
+`clamd.conf` itself does not change with `-max-upload-size`: it was
+already sized for one scan window, and a larger upload still only ever
+produces 1 GiB windows.
+
+`-max-upload-size` / `MAX_UPLOAD_SIZE` defaults to **4294967296 bytes —
+4 GiB**, raised from a previous 2147483647 (2 GiB - 1) so that a real
+archive this feature exists for — a `gnoland.log.gz` entry too big for the
+old ceiling — is actually accepted; see `defaultMaxUploadSize` in
+`cmd/portal/main.go` for the archive size that motivated it. Raising it
+further no longer costs clamd anything — it costs disk: uploads over
+`multipartMemoryThreshold` (32 MiB) spill from memory to a temp file
+(`net/http`'s own multipart handling, not anything this project wrote), so
+free disk has to cover roughly one archive's worth of space per
+concurrent submission in flight. The next hard ceiling above that is
+`storage.S3Store.Save`'s single `PutObject`, which S3 caps at 5 GiB.
 
 #### The 2 GiB wall
 

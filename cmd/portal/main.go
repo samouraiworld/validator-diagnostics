@@ -63,22 +63,34 @@ var staticFiles embed.FS
 
 // defaultMaxUploadSize is the accepted-upload ceiling this deployment
 // standardises on, and it is deliberately *not* prd.md's "for example
-// 10 GB". The value, 2147483647, is inherited from when the whole
-// archive was streamed to clamd and libclamav's own scan ceiling bound
-// it directly (see clamd.conf's comment on StreamMaxLength for that
-// ceiling — it's still real, it just doesn't reach this flag anymore):
-// clamd now only ever sees extracted content in 1 GiB windows, so this
-// is where the number was left rather than what still justifies it.
+// 10 GB". 4294967296 (4 GiB) replaces a prior 2147483647 (2 GiB - 1) that
+// was inherited from when the whole archive was streamed to clamd and
+// libclamav's own scan ceiling bound it directly (see clamd.conf's comment
+// on StreamMaxLength for that ceiling — it's still real, it just doesn't
+// reach this flag anymore): clamd now only ever sees extracted content in
+// 1 GiB windows, so the old value was outliving its justification. It was
+// raised because a real archive needed it:
+// test/samourai-crew-huge-*.tar.gz, the archive the windowed-scan feature
+// exists for, is 2406610464 bytes, and the old ceiling rejected it via
+// http.MaxBytesReader before ValidateArchive ever ran.
 //
-// Raising it is a disk/S3/time question instead: storage.S3Store.Save
-// issues a single PutObject, which S3 caps at 5 GiB, so that's the first
-// thing that would have to move, followed by how long an upload of that
-// size — and the scan windows it triggers — are allowed to take.
-const defaultMaxUploadSize = 2147483647 // legacy value; no longer libclamav's ceiling, see comment above
+// 4 GiB stays comfortably under storage.S3Store.Save's single PutObject,
+// which S3 caps at 5 GiB. The cost of raising it further is disk, not
+// clamd or S3: portal.SubmitHandler's multipart form spills past 32 MiB to
+// a temp file, so free disk per concurrent submission has to cover roughly
+// the archive size — see README.md's "Upload size and ClamAV".
+//
+// This is the source of truth for MAX_UPLOAD_SIZE's default in
+// .env.example and docker-compose.yml, which hardcode the same number
+// because they cannot import a Go constant; keep all three in step.
+const defaultMaxUploadSize = 4294967296 // 4 GiB; see README.md's "Upload size and ClamAV"
 
 // defaultMaxLogSize caps the gnoland.log.gz entry inside the archive.
-// submission's own default is 2 GiB; this deployment standardises lower so
-// one submission cannot tie up an unbounded amount of decompression work.
+// submission's own default is 2 GiB; this deployment now matches
+// defaultMaxUploadSize instead of standardising lower, because a real
+// submission needs the headroom:
+// test/samourai-crew-huge-*.tar.gz's gnoland.log.gz entry alone is
+// 2423361333 bytes compressed, well past the previous 256 MiB ceiling.
 //
 // The entry is streamed and never buffered (see submission.ValidateArchive
 // and submission.OpenLog), so this bounds *compressed* bytes read out of
@@ -86,11 +98,14 @@ const defaultMaxUploadSize = 2147483647 // legacy value; no longer libclamav's c
 // *decompressed* bytes: scoring.maxLogWindowBytes (1 GiB) for the log-window
 // scan, and -av-scan-budget (32 GiB) for the antivirus.
 //
-// 256 MiB is roughly 2.5x the largest real submission seen so far. Raise it
-// with -max-log-size (MAX_LOG_SIZE in .env) if real submissions bump into
-// it — they are rejected with a clear message when they do. README.md's
-// "Upload size and ClamAV" lists what else has to move with it.
-const defaultMaxLogSize = 256 << 20 // 256 MiB
+// Raise it with -max-log-size (MAX_LOG_SIZE in .env) if real submissions
+// bump into it — they are rejected with a clear message when they do.
+// README.md's "Upload size and ClamAV" lists what else has to move with it.
+//
+// This is the source of truth for MAX_LOG_SIZE's default in .env.example
+// and docker-compose.yml, which hardcode the same number because they
+// cannot import a Go constant; keep all three in step.
+const defaultMaxLogSize = 4294967296 // 4 GiB; see README.md's "Upload size and ClamAV"
 
 func main() {
 	remote := flag.String("remote", "", "gno.land RPC endpoint to verify operator pubkeys against, e.g. https://rpc.test13.testnets.gno.land:443")

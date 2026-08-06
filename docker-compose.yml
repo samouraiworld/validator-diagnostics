@@ -79,17 +79,25 @@ services:
       - -scores-path=/data/scores.json
       - -clamav-addr=clamav:3310
       - -clamav-timeout=15m
-      # Legacy value; clamd never sees more than a 1 GiB scan window of
-      # this at a time now, so raising it is a disk/S3/time question, not
-      # a clamd.conf one — see README.md's "Upload size and ClamAV".
-      - -max-upload-size=${MAX_UPLOAD_SIZE:-2147483647}
-      # Streamed, not buffered — see submission.ValidateArchive and
-      # submission.OpenLog. The ceiling here is decompression work, not
-      # resident memory.
-      - -max-log-size=${MAX_LOG_SIZE:-268435456}
+      # 4 GiB. clamd never sees more than a 1 GiB scan window of this at a
+      # time, so raising it further is a disk/S3/time question, not a
+      # clamd.conf one — see README.md's "Upload size and ClamAV".
+      # Source of truth: cmd/portal/main.go's defaultMaxUploadSize
+      # constant; this file can't import a Go constant, so keep the two
+      # numbers in step by hand.
+      - -max-upload-size=${MAX_UPLOAD_SIZE:-4294967296}
+      # 4 GiB, matching MAX_UPLOAD_SIZE. Streamed, not buffered — see
+      # submission.ValidateArchive and submission.OpenLog. The ceiling
+      # here is decompression work, not resident memory.
+      # Source of truth: cmd/portal/main.go's defaultMaxLogSize constant;
+      # this file can't import a Go constant, so keep the two numbers in
+      # step by hand.
+      - -max-log-size=${MAX_LOG_SIZE:-4294967296}
       # Decompressed bytes of gnoland.log.gz the antivirus may examine.
       # Past this the submission is accepted and recorded as partially
       # scanned — the cap is bomb defence, not cost control.
+      # Source of truth: clamav.DefaultScanBudget; this file can't import
+      # a Go constant, so keep the two numbers in step by hand.
       - -av-scan-budget=${AV_SCAN_BUDGET:-34359738368}
     volumes:
       - portal-logs:/data
