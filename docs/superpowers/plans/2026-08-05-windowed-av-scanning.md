@@ -910,25 +910,69 @@ git commit -m "Record what the antivirus examined on the submission entry"
 
 - [ ] **Step 1: Make the test helper build a real gzip log**
 
-In `portal/submit_test.go`, replace line 103:
+Restructure `buildValidArchive` (lines 86-133) so the log entry's raw bytes are a parameter, and keep the old name as the one-line wrapper every existing caller already uses. Nothing is duplicated: `buildValidArchive` becomes a call into `buildArchiveWithLog`.
 
 ```go
-	logContent := append([]byte{0x1f, 0x8b}, []byte("fake gzip log payload")...)
-```
+// buildValidArchive is buildArchiveWithLog carrying a genuinely
+// decompressible gnoland.log.gz. The AV pass reads that stream now, so the
+// hand-rolled two-magic-bytes stand-in this used to write would be rejected
+// as an unreadable log rather than exercising the happy path.
+func buildValidArchive(t *testing.T, validatorAddress string) []byte {
+	t.Helper()
+	return buildArchiveWithLog(t, validatorAddress, gzipBytes(t, []byte("fake gzip log payload")))
+}
 
-with:
+// buildArchiveWithLog builds the same archive with the gnoland.log.gz
+// entry's raw bytes under the caller's control, so a test can supply a
+// broken or truncated gzip.
+func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byte) []byte {
+	t.Helper()
 
-```go
-	logContent := gzipBytes(t, []byte("fake gzip log payload"))
-```
+	metadata := []byte(`{
+		"validator_address": "` + validatorAddress + `",
+		"moniker": "samourai",
+		"chain_id": "topaz-1",
+		"gnoland_version": "v1.0.0",
+		"genesis_sha256": "deadbeef",
+		"operating_system": "Debian 12",
+		"architecture": "amd64",
+		"sentry_enabled": true,
+		"backup_node": true,
+		"hosting_provider": "Scaleway",
+		"deployment_method": "docker",
+		"recent_operations": "None"
+	}`)
 
-and add the helper below `buildValidArchive`:
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
 
-```go
-// gzipBytes gzips content, so archives built here carry a gnoland.log.gz
-// that is genuinely decompressible. The AV pass reads that stream, so a
-// hand-rolled two-magic-bytes stand-in would now be rejected as an
-// unreadable log rather than exercising the happy path.
+	for _, e := range []struct {
+		name    string
+		content []byte
+	}{
+		{"gnoland.log.gz", logContent},
+		{"metadata.json", metadata},
+	} {
+		hdr := &tar.Header{Name: e.name, Typeflag: tar.TypeReg, Size: int64(len(e.content)), Mode: 0o644}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("WriteHeader: %v", err)
+		}
+		if _, err := tw.Write(e.content); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar Close: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
+
+	return buf.Bytes()
+}
+
 func gzipBytes(t *testing.T, content []byte) []byte {
 	t.Helper()
 
@@ -969,53 +1013,6 @@ func submitArchive(t *testing.T, handler *SubmitHandler, sessions *auth.SessionS
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
-}
-
-// buildArchiveWithLog is buildValidArchive with the log entry's raw bytes
-// under the caller's control, so tests can supply a broken gzip.
-func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byte) []byte {
-	t.Helper()
-
-	metadata := []byte(`{
-		"validator_address": "` + validatorAddress + `",
-		"moniker": "samourai",
-		"chain_id": "topaz-1",
-		"gnoland_version": "v1.0.0",
-		"genesis_sha256": "deadbeef",
-		"operating_system": "Debian 12",
-		"architecture": "amd64",
-		"sentry_enabled": true,
-		"backup_node": true,
-		"hosting_provider": "Scaleway",
-		"deployment_method": "docker",
-		"recent_operations": "None"
-	}`)
-
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-	for _, e := range []struct {
-		name    string
-		content []byte
-	}{
-		{"gnoland.log.gz", logContent},
-		{"metadata.json", metadata},
-	} {
-		hdr := &tar.Header{Name: e.name, Typeflag: tar.TypeReg, Size: int64(len(e.content)), Mode: 0o644}
-		if err := tw.WriteHeader(hdr); err != nil {
-			t.Fatalf("WriteHeader: %v", err)
-		}
-		if _, err := tw.Write(e.content); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("tar Close: %v", err)
-	}
-	if err := gw.Close(); err != nil {
-		t.Fatalf("gzip Close: %v", err)
-	}
-	return buf.Bytes()
 }
 
 // capturingScanner records every stream it is handed, so the tests can
