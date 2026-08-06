@@ -994,6 +994,40 @@ func TestSubmitHandler_RejectsInfectedSentryLog(t *testing.T) {
 	}
 }
 
+func TestSubmitHandler_RejectsInfectedValidatorLogWithSentryPresent(t *testing.T) {
+	// Clean for metadata.json, infected on the second stream — the
+	// validator log — with a sentry log also present in the archive. The
+	// walk must stop right there: the sentry log's content must never
+	// reach the scanner at all.
+	scanner := &capturingScanner{verdicts: []clamav.Verdict{
+		{},
+		{Infected: true, Signature: "Test.Validator"},
+	}}
+	handler, sessions, _, store := avHandler(t, scanner, 0)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, []byte("validator payload")),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("an archive with an infected validator log was stored")
+	}
+
+	streams := scanner.captured()
+	if len(streams) != 2 {
+		t.Fatalf("got %d scans, want 2 (metadata.json, then the infected validator log) — the walk should have stopped before the sentry log", len(streams))
+	}
+	for _, chunk := range streams {
+		if bytes.Contains(chunk, []byte("sentry payload")) {
+			t.Error("the sentry log was scanned after the validator log was already found infected")
+		}
+	}
+}
+
 func TestSubmitHandler_RejectsUnreadableSentryLogGzip(t *testing.T) {
 	handler, sessions, _, store := avHandler(t, &capturingScanner{}, 0)
 	addr := testOperatorAddr()
