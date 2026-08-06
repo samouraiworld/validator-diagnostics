@@ -156,16 +156,23 @@ turn the setting off.
 
 #### What a partial scan means
 
-A submission's antivirus coverage can end early two ways: the budget
-(`-av-scan-budget`) runs out, or the log stream itself breaks partway
-through — a truncated `gnoland.log.gz`, or clamd disconnecting mid-window.
-Either way the submission is **accepted, stored, and badged** — never
-silently treated as fully scanned, and never rejected for this reason
-alone. Only an actual malware verdict, or the scanner itself being
-unreachable, rejects a submission. What was and wasn't examined travels
-with the record (`Entry.Scan`, a `Coverage{Complete, Bytes}`), and the
-admin dashboard shows it: `scan ✓` for complete coverage, `scan partiel`
-with a byte count for partial.
+A submission's antivirus coverage can end early two ways and still be
+accepted: the budget (`-av-scan-budget`) runs out, or the log stream
+itself breaks partway through — a truncated `gnoland.log.gz`. Either way
+the submission is **accepted, stored, and badged** — never silently
+treated as fully scanned, and never rejected for this reason alone.
+
+clamd disconnecting mid-window is different, not a third partial-coverage
+case: that is the *scanner* failing, not the log source, and
+`clamav.WindowedScanner.ScanStream` can only tell the two apart by
+whether reading the log itself produced the error. A scanner failure
+always comes back as a plain error, which the handler turns into a 503
+and rejects the submission — the same outcome as clamd being unreachable
+from the start. Only an actual malware verdict, or the scanner itself
+failing (including disconnecting mid-window), rejects a submission. What
+was and wasn't examined travels with the record (`Entry.Scan`, a
+`Coverage{Complete, Bytes}`), and the admin dashboard shows it: `scan ✓`
+for complete coverage, `scan partiel` with a byte count for partial.
 
 A `gnoland.log.gz` that cannot be decompressed **at all** is different:
 nothing in it was ever readable, so nothing in it could be scanned, and
