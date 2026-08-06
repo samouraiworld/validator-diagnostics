@@ -6,10 +6,12 @@
 // -s3-bucket (+ -s3-region/-s3-endpoint, with credentials from the
 // S3_ACCESS_KEY/S3_SECRET_KEY environment variables) for production.
 //
-// Uploads are streamed to clamd for a malware scan before being stored
-// when -clamav-addr is set; the scan fails closed, so keep
-// -max-upload-size at or below clamd's own StreamMaxLength (the bundled
-// clamd.conf sets both to 2 GiB) or real uploads are rejected with 503.
+// The archive's *extracted content* — metadata.json whole, then the
+// decompressed gnoland.log.gz in 1 GiB windows — is streamed to clamd for
+// a malware scan before being stored, when -clamav-addr is set; the scan
+// still fails closed. clamd's own StreamMaxLength (the bundled clamd.conf
+// sets it to 2147483647) now only has to cover one window plus its 1 MiB
+// overlap, not the whole -max-upload-size archive.
 //
 // Required environment variables:
 //   - ADMIN_OPERATOR_ADDRESSES — comma-separated bech32 operator
@@ -61,18 +63,18 @@ var staticFiles embed.FS
 
 // defaultMaxUploadSize is the accepted-upload ceiling this deployment
 // standardises on, and it is deliberately *not* prd.md's "for example
-// 10 GB": every upload is streamed to clamd before it is stored, and
-// clamd refuses anything past its own StreamMaxLength (25 MiB out of the
-// box). The bundled clamd.conf raises that limit to this same value, so
-// the two bounds agree; raising one without the other turns oversized
-// uploads into 503s instead of a clean rejection.
+// 10 GB". The value, 2147483647, is inherited from when the whole
+// archive was streamed to clamd and libclamav's own scan ceiling bound
+// it directly (see clamd.conf's comment on StreamMaxLength for that
+// ceiling — it's still real, it just doesn't reach this flag anymore):
+// clamd now only ever sees extracted content in 1 GiB windows, so this
+// is where the number was left rather than what still justifies it.
 //
-// The value is 2 GiB minus one byte rather than a round 2 GiB because
-// libclamav cannot scan a file of 2147483648 bytes or more at all — no
-// clamd.conf setting lifts that, so an upload of exactly 2 GiB would be
-// accepted here and then fail the scan with a 503. See clamd.conf's own
-// comment for the warning clamd logs when you try.
-const defaultMaxUploadSize = 2147483647 // 2 GiB - 1, libclamav's hard scan ceiling
+// Raising it is a disk/S3/time question instead: storage.S3Store.Save
+// issues a single PutObject, which S3 caps at 5 GiB, so that's the first
+// thing that would have to move, followed by how long an upload of that
+// size — and the scan windows it triggers — are allowed to take.
+const defaultMaxUploadSize = 2147483647 // legacy value; no longer libclamav's ceiling, see comment above
 
 // defaultMaxLogSize caps the gnoland.log.gz entry inside the archive.
 // submission's own default is 2 GiB; this deployment standardises lower so
@@ -103,8 +105,8 @@ func main() {
 	exercisePath := flag.String("exercise-path", "./exercise.json", "path to the Phase 3 exercise config file, managed via POST /admin/exercise")
 	scoresPath := flag.String("scores-path", "./scores.json", "path to the Phase 3 scoring records file")
 	clamavAddr := flag.String("clamav-addr", "", "clamd address to scan uploads against (host:port, or unix:/path/to/socket); leave empty to disable AV scanning (NOT recommended for production)")
-	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; must comfortably cover streaming a whole -max-upload-size archive to clamd")
-	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; keep this <= clamd's StreamMaxLength (see clamd.conf) or scannable uploads will be rejected with 503")
+	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; bounds one scan window now (at most 1 GiB, roughly 7s at the measured rate), not the whole upload")
+	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; clamd never sees more than a 1 GiB window of it at a time, so raising this is a storage/time question, not a clamd one (storage.S3Store.Save's single PutObject caps at 5 GiB)")
 	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of the gnoland.log.gz entry inside the archive; the entry is streamed rather than buffered, so this bounds decompression work rather than memory")
 	avScanBudget := flag.Int64("av-scan-budget", clamav.DefaultScanBudget, "maximum decompressed bytes of gnoland.log.gz submitted to the antivirus; a submission that exceeds it is accepted and recorded as partially scanned, not rejected")
 	flag.Parse()

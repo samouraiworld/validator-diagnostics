@@ -3,15 +3,17 @@ services:
     image: clamav/clamav:stable
     volumes:
       - clamav-data:/var/lib/clamav
-      # Raises clamd's stock stream limit to the 2 GiB the portal accepts,
-      # and makes it report content it skipped for exceeding a limit
-      # instead of answering OK — see the file's own header. Note this
-      # replaces the image's config wholesale, so anything the stock file
-      # set is gone unless clamd.conf sets it too.
+      # Raises clamd's stock stream limit to comfortably cover one scan
+      # window (metadata.json, or a 1 GiB gnoland.log.gz window plus its
+      # 1 MiB overlap), and makes it report content it skipped for
+      # exceeding a limit instead of answering OK — see the file's own
+      # header. Note this replaces the image's config wholesale, so
+      # anything the stock file set is gone unless clamd.conf sets it too.
       - ./clamd.conf:/etc/clamav/clamd.conf:ro
       # clamd spools each INSTREAM body here (TemporaryDirectory in
-      # clamd.conf). On the container's writable layer, concurrent 2 GiB
-      # uploads would eat the host's Docker storage instead.
+      # clamd.conf). On the container's writable layer, concurrent ~1 GiB
+      # scan windows across concurrent uploads would eat the host's Docker
+      # storage instead.
       - clamav-tmp:/var/tmp/clamav
     # clamd holds the whole signature database resident (~1-2 GB). Without
     # a ceiling a spike takes the host down with it; with one, the
@@ -77,7 +79,9 @@ services:
       - -scores-path=/data/scores.json
       - -clamav-addr=clamav:3310
       - -clamav-timeout=15m
-      # Must stay <= clamd.conf's StreamMaxLength.
+      # Legacy value; clamd never sees more than a 1 GiB scan window of
+      # this at a time now, so raising it is a disk/S3/time question, not
+      # a clamd.conf one — see README.md's "Upload size and ClamAV".
       - -max-upload-size=${MAX_UPLOAD_SIZE:-2147483647}
       # Streamed, not buffered — see submission.ValidateArchive and
       # submission.OpenLog. The ceiling here is decompression work, not
