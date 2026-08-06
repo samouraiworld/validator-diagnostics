@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"testing"
 )
@@ -390,5 +391,118 @@ func TestValidateArchive_RejectsDuplicateSentryLog(t *testing.T) {
 
 	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
 		t.Fatal("expected a duplicate sentry log entry to be rejected, got nil")
+	}
+}
+
+func TestScanLogs_VisitsBothLogs(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: []byte("validator payload")},
+		{name: SentryLogFileName, content: []byte("sentry payload")},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	seen := map[string]string{}
+	err := ScanLogs(context.Background(), bytes.NewReader(data), Options{}, func(name string, log io.Reader) error {
+		body, err := io.ReadAll(log)
+		if err != nil {
+			return err
+		}
+		seen[name] = string(body)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ScanLogs: unexpected error: %v", err)
+	}
+
+	if got := seen[ValidatorLogFileName]; got != "validator payload" {
+		t.Errorf("validator log = %q, want %q", got, "validator payload")
+	}
+	if got := seen[SentryLogFileName]; got != "sentry payload" {
+		t.Errorf("sentry log = %q, want %q", got, "sentry payload")
+	}
+	if len(seen) != 2 {
+		t.Errorf("visited %d entries, want 2 (metadata.json must not be visited)", len(seen))
+	}
+}
+
+func TestScanLogs_VisitsOnlyTheValidatorLogWhenNoSentry(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: []byte("validator payload")},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	var names []string
+	err := ScanLogs(context.Background(), bytes.NewReader(data), Options{}, func(name string, log io.Reader) error {
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ScanLogs: unexpected error: %v", err)
+	}
+	if len(names) != 1 || names[0] != ValidatorLogFileName {
+		t.Errorf("visited %v, want [%s]", names, ValidatorLogFileName)
+	}
+}
+
+func TestScanLogs_CallbackErrorAbortsTheWalkUnwrapped(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: []byte("validator payload")},
+		{name: SentryLogFileName, content: []byte("sentry payload")},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	sentinel := errors.New("stop here")
+	var calls int
+	err := ScanLogs(context.Background(), bytes.NewReader(data), Options{}, func(name string, log io.Reader) error {
+		calls++
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ScanLogs error = %v, want it to wrap the callback's sentinel", err)
+	}
+	if calls != 1 {
+		t.Errorf("callback called %d times, want 1 (the walk must stop on error)", calls)
+	}
+}
+
+func TestScanLogs_UnreadEntryDoesNotBreakTheWalk(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: bytes.Repeat([]byte("x"), 4096)},
+		{name: SentryLogFileName, content: []byte("sentry payload")},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	var names []string
+	err := ScanLogs(context.Background(), bytes.NewReader(data), Options{}, func(name string, log io.Reader) error {
+		// Deliberately does not consume the entry: scanArchive declines
+		// an entry once its AV budget is spent.
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ScanLogs: unexpected error: %v", err)
+	}
+	if len(names) != 2 {
+		t.Errorf("visited %v, want both logs even though neither was read", names)
+	}
+}
+
+func TestScanLogs_BoundsEachEntry(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: bytes.Repeat([]byte("x"), 64)},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	var n int
+	err := ScanLogs(context.Background(), bytes.NewReader(data), Options{MaxLogSize: 8}, func(name string, log io.Reader) error {
+		body, err := io.ReadAll(log)
+		n = len(body)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("ScanLogs: unexpected error: %v", err)
+	}
+	if n != 8 {
+		t.Errorf("read %d bytes, want 8 (MaxLogSize must bound the entry reader)", n)
 	}
 }

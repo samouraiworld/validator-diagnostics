@@ -32,6 +32,12 @@ var (
 	requiredEntries = []string{ValidatorLogFileName, MetadataFileName}
 )
 
+// logEntries is the subset of allowedEntries ScanLogs visits.
+var logEntries = map[string]bool{
+	ValidatorLogFileName: true,
+	SentryLogFileName:    true,
+}
+
 // Options bounds how much of each archive entry ValidateArchive will
 // read, independent of what the archive itself claims. Zero values fall
 // back to conservative defaults.
@@ -247,6 +253,58 @@ type logStream struct {
 }
 
 func (s logStream) Close() error { return s.closer.Close() }
+
+// ScanLogs walks r — which must be a rewound reader over an archive
+// ValidateArchive has already accepted — and calls fn once per log
+// entry, with a reader bounded to opts.MaxLogSize.
+//
+// The callback shape is what keeps this to a single walk. A tar entry's
+// reader is only valid until the next Next call, so a function handing
+// streams back to its caller can only ever hand back one, and reading
+// two entries would cost two walks — two decompressions of the outer
+// gzip over an archive that may run to gigabytes. fn need not consume
+// its entry: Next skips whatever is left, which is what lets the
+// antivirus pass decline an entry once its budget is spent.
+//
+// fn's error is returned unwrapped, so a caller's sentinel survives
+// errors.Is.
+//
+// ScanLogs deliberately does not re-run ValidateArchive's structural
+// checks (allowed names, duplicates, file types, required entries) —
+// those are that function's job and are not duplicated here. The
+// MaxLogSize bound is kept as defence in depth against a caller that
+// skipped validation, not because a validated archive could exceed it.
+func ScanLogs(ctx context.Context, r io.Reader, opts Options, fn func(name string, log io.Reader) error) error {
+	opts = opts.withDefaults()
+
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("not a valid gzip stream: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("corrupt tar stream: %w", err)
+		}
+		if !logEntries[hdr.Name] {
+			continue
+		}
+
+		if err := fn(hdr.Name, io.LimitReader(tr, opts.MaxLogSize)); err != nil {
+			return err
+		}
+	}
+}
 
 // readBounded drains r — already positioned at the start of a tar entry —
 // without ever buffering it, and returns the total byte count read plus
