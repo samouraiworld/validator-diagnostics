@@ -203,7 +203,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// scanned, and storing it would be exactly the fail-open the
 			// AV step exists to prevent.
 			writeSubmitResult(w, http.StatusBadRequest, submitResponse{
-				Error: fmt.Sprintf("%s could not be decompressed, so it could not be scanned: %v", submission.LogFileName, err),
+				Error: fmt.Sprintf("%s could not be decompressed, so it could not be scanned: %v", submission.ValidatorLogFileName, err),
 			})
 			return
 		case err != nil:

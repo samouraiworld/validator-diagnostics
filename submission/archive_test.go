@@ -77,7 +77,7 @@ var validMetadataContent = []byte(`{
 
 func TestValidateArchive_Valid(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -92,7 +92,7 @@ func TestValidateArchive_Valid(t *testing.T) {
 
 func TestValidateArchive_RejectsUnexpectedEntry(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 		{name: "extra.txt", content: []byte("surprise")},
 	})
@@ -104,10 +104,10 @@ func TestValidateArchive_RejectsUnexpectedEntry(t *testing.T) {
 
 func TestValidateArchive_RejectsPathTraversal(t *testing.T) {
 	for _, name := range []string{
-		"../" + LogFileName,
+		"../" + ValidatorLogFileName,
 		"../../etc/passwd",
-		"sub/" + LogFileName,
-		"/etc/" + LogFileName,
+		"sub/" + ValidatorLogFileName,
+		"/etc/" + ValidatorLogFileName,
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := buildTarGz(t, []tarEntry{
@@ -124,7 +124,7 @@ func TestValidateArchive_RejectsPathTraversal(t *testing.T) {
 
 func TestValidateArchive_RejectsSymlink(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+		{name: ValidatorLogFileName, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -135,7 +135,7 @@ func TestValidateArchive_RejectsSymlink(t *testing.T) {
 
 func TestValidateArchive_RejectsHardlink(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, typeflag: tar.TypeLink, linkname: MetadataFileName},
+		{name: ValidatorLogFileName, typeflag: tar.TypeLink, linkname: MetadataFileName},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -146,7 +146,7 @@ func TestValidateArchive_RejectsHardlink(t *testing.T) {
 
 func TestValidateArchive_RejectsDirectory(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, typeflag: tar.TypeDir},
+		{name: ValidatorLogFileName, typeflag: tar.TypeDir},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -159,7 +159,7 @@ func TestValidateArchive_RejectsDuplicateEntry(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
 		{name: MetadataFileName, content: validMetadataContent},
 		{name: MetadataFileName, content: validMetadataContent},
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 	})
 
 	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
@@ -179,7 +179,7 @@ func TestValidateArchive_RejectsMissingEntry(t *testing.T) {
 
 func TestValidateArchive_RejectsOversizedEntry(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -191,7 +191,7 @@ func TestValidateArchive_RejectsOversizedEntry(t *testing.T) {
 
 func TestValidateArchive_RejectsOversizedLogEntry(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -206,7 +206,7 @@ func TestValidateArchive_AcceptsLogEntryExactlyAtMaxLogSize(t *testing.T) {
 	// entry of exactly MaxLogSize bytes is accepted, not rejected as
 	// oversized.
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -218,7 +218,7 @@ func TestValidateArchive_AcceptsLogEntryExactlyAtMaxLogSize(t *testing.T) {
 
 func TestValidateArchive_RejectsBadLogMagicBytes(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: []byte("not actually gzip")},
+		{name: ValidatorLogFileName, content: []byte("not actually gzip")},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -236,7 +236,7 @@ func TestValidateArchive_RejectsNonGzipInput(t *testing.T) {
 
 func TestOpenLog_StreamsTheLogEntry(t *testing.T) {
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -262,7 +262,7 @@ func TestOpenLog_BoundsTheStreamToMaxLogSize(t *testing.T) {
 	// earlier pass, so a caller that skips validation still can't read
 	// unbounded bytes.
 	data := buildTarGz(t, []tarEntry{
-		{name: LogFileName, content: validLogContent},
+		{name: ValidatorLogFileName, content: validLogContent},
 		{name: MetadataFileName, content: validMetadataContent},
 	})
 
@@ -299,5 +299,96 @@ func TestOpenLog_ErrorsOnNonGzipInput(t *testing.T) {
 	if err == nil {
 		rc.Close()
 		t.Fatal("expected non-gzip input to be rejected, got nil")
+	}
+}
+
+func TestValidateArchive_RejectsOldGnolandLogName(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: "gnoland.log.gz", content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
+		t.Fatal("expected gnoland.log.gz to be rejected after the rename, got nil")
+	}
+}
+
+func TestValidateArchive_AcceptsOptionalSentryLog(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: validLogContent},
+		{name: SentryLogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	result, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{})
+	if err != nil {
+		t.Fatalf("ValidateArchive: unexpected error: %v", err)
+	}
+	if !result.SentryLogPresent {
+		t.Error("SentryLogPresent = false, want true")
+	}
+}
+
+func TestValidateArchive_SentryLogIsOptional(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	result, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{})
+	if err != nil {
+		t.Fatalf("ValidateArchive: unexpected error: %v", err)
+	}
+	if result.SentryLogPresent {
+		t.Error("SentryLogPresent = true, want false")
+	}
+}
+
+func TestValidateArchive_RejectsMissingValidatorLog(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: SentryLogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
+		t.Fatal("expected an archive without validator.log.gz to be rejected, got nil")
+	}
+}
+
+func TestValidateArchive_RejectsSentryLogWithBadMagic(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: validLogContent},
+		{name: SentryLogFileName, content: []byte("not gzip at all")},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
+		t.Fatal("expected a sentry log with bad gzip magic to be rejected, got nil")
+	}
+}
+
+func TestValidateArchive_RejectsOversizedSentryLog(t *testing.T) {
+	content := append([]byte{0x1f, 0x8b}, bytes.Repeat([]byte("x"), 64)...)
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: validLogContent},
+		{name: SentryLogFileName, content: content},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{MaxLogSize: 8}); err == nil {
+		t.Fatal("expected an oversized sentry log to be rejected, got nil")
+	}
+}
+
+func TestValidateArchive_RejectsDuplicateSentryLog(t *testing.T) {
+	data := buildTarGz(t, []tarEntry{
+		{name: ValidatorLogFileName, content: validLogContent},
+		{name: SentryLogFileName, content: validLogContent},
+		{name: SentryLogFileName, content: validLogContent},
+		{name: MetadataFileName, content: validMetadataContent},
+	})
+
+	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
+		t.Fatal("expected a duplicate sentry log entry to be rejected, got nil")
 	}
 }

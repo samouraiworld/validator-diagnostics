@@ -9,17 +9,28 @@ import (
 )
 
 const (
-	LogFileName      = "gnoland.log.gz"
-	MetadataFileName = "metadata.json"
+	ValidatorLogFileName = "validator.log.gz"
+	SentryLogFileName    = "sentry.log.gz"
+	MetadataFileName     = "metadata.json"
 
 	defaultMaxLogSize      = 2 << 30 // 2 GiB
 	defaultMaxMetadataSize = 64 << 10
 )
 
-var allowedEntries = map[string]bool{
-	LogFileName:      true,
-	MetadataFileName: true,
-}
+// allowedEntries is what may appear in an archive; requiredEntries is
+// what must. They were one map until sentry.log.gz — the first entry
+// that is accepted without being demanded — made the two sets differ.
+// requiredEntries is a slice, not a map, so a submission missing both
+// required entries always names the same one in its error rather than
+// whichever the map's iteration order surfaced that run.
+var (
+	allowedEntries = map[string]bool{
+		ValidatorLogFileName: true,
+		SentryLogFileName:    true,
+		MetadataFileName:     true,
+	}
+	requiredEntries = []string{ValidatorLogFileName, MetadataFileName}
+)
 
 // Options bounds how much of each archive entry ValidateArchive will
 // read, independent of what the archive itself claims. Zero values fall
@@ -44,23 +55,32 @@ func (o Options) withDefaults() Options {
 // ValidateMetadata separately; filename/structure checks and metadata
 // *content* checks are different concerns with different failure modes.
 //
-// The gnoland.log.gz entry is deliberately not carried here. It is
-// validated in place — magic bytes checked, the rest drained and counted
-// without ever being buffered — and then dropped, so memory for that
-// entry stays O(1) regardless of its size; callers that need its content
-// (see the scoring package) stream it back out with OpenLog.
+// Neither log entry is carried here. Each is validated in place — magic
+// bytes checked, the rest drained and counted without ever being
+// buffered — and then dropped, so memory for either stays O(1) regardless
+// of its size; callers that need the content (see the scoring package)
+// stream it back out with OpenLog.
 type Result struct {
 	Metadata []byte
+
+	// SentryLogPresent records whether the optional sentry.log.gz entry
+	// was in the archive. It is carried out of here because the only
+	// other way to answer it is a second walk of the tar, and the
+	// question outlives this function: scoring reports "no sentry log
+	// submitted" differently from "a sentry log we could not parse".
+	SentryLogPresent bool
 }
 
 // ValidateArchive streams through r (expected to be a gzip-compressed
 // tar) and enforces prd.md's "Security Considerations":
 //
-//   - Only the two expected entries are accepted; anything else fails
-//     the whole archive closed (fail-closed on the first violation).
+//   - Only the three known entries are accepted; anything else fails the
+//     whole archive closed (fail-closed on the first violation).
+//     sentry.log.gz is optional — its absence is not a failure — but any
+//     other unrecognised name is.
 //   - Path traversal is blocked by exact-name allowlisting rather than
 //     pattern blocklisting: an entry named "../etc/passwd" or
-//     "sub/gnoland.log.gz" simply never matches an allowed name.
+//     "sub/validator.log.gz" simply never matches an allowed name.
 //   - Only regular files are accepted — symlinks, hardlinks,
 //     directories, and device entries are all rejected.
 //   - No duplicate entries.
@@ -69,11 +89,11 @@ type Result struct {
 //     compression ratio claim (defends against zip/tar bombs without
 //     trusting declared sizes). For metadata.json that bound is on
 //     memory too — it's small (64 KiB) and genuinely needed by the
-//     caller, so it's read into memory whole. For gnoland.log.gz —
-//     potentially hundreds of MB — memory is O(1) regardless of
-//     MaxLogSize: it's drained and counted without ever being buffered,
-//     so the Options bound there caps decompression time, not resident
-//     memory.
+//     caller, so it's read into memory whole. For validator.log.gz and
+//     sentry.log.gz — potentially hundreds of MB — memory is O(1)
+//     regardless of MaxLogSize: each is drained and counted without ever
+//     being buffered, so the Options bound there caps decompression
+//     time, not resident memory.
 //
 // ValidateArchive never writes the archive anywhere; storing the
 // original raw bytes after successful validation is the caller's
@@ -91,6 +111,7 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 
 	seen := make(map[string]bool, len(allowedEntries))
 	var metadata []byte
+	var sentryPresent bool
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -106,7 +127,7 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 		}
 
 		if !allowedEntries[hdr.Name] {
-			return Result{}, fmt.Errorf("unexpected archive entry %q: only %s and %s are accepted", hdr.Name, LogFileName, MetadataFileName)
+			return Result{}, fmt.Errorf("unexpected archive entry %q: only %s, %s, and %s are accepted", hdr.Name, ValidatorLogFileName, SentryLogFileName, MetadataFileName)
 		}
 		if seen[hdr.Name] {
 			return Result{}, fmt.Errorf("duplicate archive entry %q", hdr.Name)
@@ -118,12 +139,12 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 		}
 
 		switch hdr.Name {
-		case LogFileName:
-			// gnoland.log.gz can be hundreds of MB, so unlike
-			// metadata.json below it is never materialised: readBounded
-			// drains it through a bounded reader, counting bytes as it
-			// goes, and hands back only the first two (the gzip magic)
-			// that ever needed inspecting.
+		case ValidatorLogFileName, SentryLogFileName:
+			// Both logs get identical treatment: they can be hundreds of
+			// MB, so unlike metadata.json below neither is ever
+			// materialised — readBounded drains each through a bounded
+			// reader, counting bytes as it goes, and hands back only the
+			// first two (the gzip magic) that ever needed inspecting.
 			n, magic, err := readBounded(tr, opts.MaxLogSize)
 			if err != nil {
 				return Result{}, fmt.Errorf("reading archive entry %q: %w", hdr.Name, err)
@@ -132,13 +153,16 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 				return Result{}, fmt.Errorf("archive entry %q exceeds the %d byte limit", hdr.Name, opts.MaxLogSize)
 			}
 			if n < 2 || magic[0] != 0x1f || magic[1] != 0x8b {
-				return Result{}, fmt.Errorf("%s does not look like a gzip file (bad magic bytes)", LogFileName)
+				return Result{}, fmt.Errorf("%s does not look like a gzip file (bad magic bytes)", hdr.Name)
+			}
+			if hdr.Name == SentryLogFileName {
+				sentryPresent = true
 			}
 
 		case MetadataFileName:
 			// metadata.json is bounded to 64 KiB by default and its
 			// content is genuinely needed by the caller, so — unlike
-			// gnoland.log.gz above — it's fine, and simpler, to hold the
+			// the log entries above — it's fine, and simpler, to hold the
 			// whole thing in memory.
 			//
 			// Read up to limit+1 so a file that's exactly at the limit
@@ -157,13 +181,13 @@ func ValidateArchive(ctx context.Context, r io.Reader, opts Options) (Result, er
 		}
 	}
 
-	for name := range allowedEntries {
+	for _, name := range requiredEntries {
 		if !seen[name] {
 			return Result{}, fmt.Errorf("archive is missing required entry %q", name)
 		}
 	}
 
-	return Result{Metadata: metadata}, nil
+	return Result{Metadata: metadata, SentryLogPresent: sentryPresent}, nil
 }
 
 // OpenLog walks r — which must be a rewound reader over an archive
@@ -198,13 +222,13 @@ func OpenLog(ctx context.Context, r io.Reader, opts Options) (io.ReadCloser, err
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			gz.Close()
-			return nil, fmt.Errorf("archive is missing required entry %q", LogFileName)
+			return nil, fmt.Errorf("archive is missing required entry %q", ValidatorLogFileName)
 		}
 		if err != nil {
 			gz.Close()
 			return nil, fmt.Errorf("corrupt tar stream: %w", err)
 		}
-		if hdr.Name != LogFileName {
+		if hdr.Name != ValidatorLogFileName {
 			continue
 		}
 
@@ -226,7 +250,7 @@ func (s logStream) Close() error { return s.closer.Close() }
 
 // readBounded drains r — already positioned at the start of a tar entry —
 // without ever buffering it, and returns the total byte count read plus
-// the first two bytes seen (gnoland.log.gz's gzip magic; zero-valued if
+// the first two bytes seen (the log entry's gzip magic; zero-valued if
 // fewer than two bytes were available).
 //
 // It reads up to limit+1 bytes total, the same "one past the limit" trick

@@ -122,7 +122,7 @@ func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byt
 		name    string
 		content []byte
 	}{
-		{"gnoland.log.gz", logContent},
+		{"validator.log.gz", logContent},
 		{"metadata.json", metadata},
 	} {
 		hdr := &tar.Header{Name: e.name, Typeflag: tar.TypeReg, Size: int64(len(e.content)), Mode: 0o644}
