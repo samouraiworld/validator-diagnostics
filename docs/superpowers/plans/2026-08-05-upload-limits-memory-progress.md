@@ -89,7 +89,7 @@ In `cmd/portal/main.go`, replace the whole `defaultMaxLogSize` block (currently 
 // The entry is streamed and never buffered (see submission.OpenLog), so
 // this bounds *compressed* bytes read out of the archive rather than
 // resident memory. The separate bound on *decompressed* bytes is
-// scoring.maxLogWindowBytes (1 GiB), which is what stops a small upload from
+// scoring.maxLogScanBytes (1 GiB), which is what stops a small upload from
 // expanding without limit during the log-window scan.
 //
 // 256 MiB is roughly 2.5x the largest real submission seen so far. Raise it
@@ -445,7 +445,7 @@ Change its first statement (line 81) from `gzip.NewReader(bytes.NewReader(logGz)
 
 Remove `"bytes"` from the import block — line 81 was its only use in the file.
 
-Finally, update the `maxLogWindowBytes` comment (line 18) which currently reads "independent of the compressed-size cap `submission.ValidateArchive` already applied to logGz" — the cap is now applied by two functions:
+Finally, update the `maxLogScanBytes` comment (line 18) which currently reads "independent of the compressed-size cap `submission.ValidateArchive` already applied to logGz" — the cap is now applied by two functions:
 
 ```go
 // cap submission.ValidateArchive enforces and submission.OpenLog re-applies.

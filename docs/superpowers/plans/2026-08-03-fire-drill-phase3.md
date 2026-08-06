@@ -938,7 +938,7 @@ import (
 	"github.com/samourai/validator-diagnostics/submission"
 )
 
-// maxLogWindowBytes bounds how much *decompressed* plaintext scanLogWindow
+// maxLogScanBytes bounds how much *decompressed* plaintext scanLogWindow
 // will read out of gnoland.log.gz, independent of the compressed-size
 // cap submission.ValidateArchive already applied to logGz. This is the
 // inner-layer equivalent of prd.md's "decompressed-size limit,
@@ -946,7 +946,7 @@ import (
 // own content is itself gzip-compressed plaintext that ValidateArchive
 // never decompresses, so this is the first place that decompression
 // happens, and it needs its own bomb protection.
-const maxLogWindowBytes = 8 << 20 // 8 MiB of plaintext is far more than needed to find a first/last timestamp
+const maxLogScanBytes = 8 << 20 // 8 MiB of plaintext is far more than needed to find a first/last timestamp
 
 // timestampLayouts are tried, in order, against the first
 // whitespace-delimited token of each log line.
@@ -987,7 +987,7 @@ func scanLogWindow(logGz []byte, cfg exercise.Config) LogWindowCheck {
 	}
 	defer gz.Close()
 
-	bounded := io.LimitReader(gz, maxLogWindowBytes)
+	bounded := io.LimitReader(gz, maxLogScanBytes)
 	scanner := bufio.NewScanner(bounded)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // cap a single buffered line at 1 MiB
 

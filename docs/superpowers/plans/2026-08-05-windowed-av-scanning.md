@@ -37,7 +37,7 @@
 - `portal/submit_test.go:103, 207-256, 445-512` — `buildValidArchive` must emit a real gzip log; new handler tests.
 - `portal/log_test.go` — round-trip and legacy-line tests for the new field.
 - `cmd/portal/main.go:62-92, 106-110, 144-149, 156-170, 180-200` — flag, `muxDeps`, the `NoopScanner` fallback removal, comment corrections.
-- `scoring/checks.go:15, 31, 69, 79`, `scoring/score.go:70`, `scoring/checks_test.go:180, 199` — the `maxLogWindowBytes` → `maxLogWindowBytes` rename.
+- `scoring/checks.go:15, 31, 69, 79`, `scoring/score.go:70`, `scoring/checks_test.go:180, 199` — the `maxLogScanBytes` → `maxLogWindowBytes` rename.
 - `cmd/portal/static/admin.js` — the scan badge and a local `formatBytes`.
 - `docker-compose.yml:69-85`, `.env.example`, `.env`, `clamd.conf:1-13`, `README.md:60-130` — configuration and documentation.
 
@@ -1557,20 +1557,20 @@ git commit -m "Make the antivirus scan budget configurable"
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: `scoring.maxLogWindowBytes` replaces `scoring.maxLogWindowBytes`. Unexported, so no other package is affected.
+- Produces: `scoring.maxLogWindowBytes` replaces `scoring.maxLogScanBytes`. Unexported, so no other package is affected.
 
 After this change the same `gnoland.log.gz` is bounded twice in decompressed bytes, 32x apart and for unrelated reasons. "Scan" becomes the antivirus's word; the scoring constant is named for what it bounds.
 
 - [ ] **Step 1: Rename every occurrence**
 
-Run: `grep -rn maxLogWindowBytes --include='*.go' .`
+Run: `grep -rn maxLogScanBytes --include='*.go' .`
 Expected sites: `scoring/checks.go` lines 15, 31, 69, 79; `scoring/score.go` line 70; `scoring/checks_test.go` lines 180, 199; `cmd/portal/main.go` line 84.
 
 Rename the constant and every reference to `maxLogWindowBytes`.
 
 - [ ] **Step 2: Update the constant's doc comment**
 
-In `scoring/checks.go`, the comment above the constant currently opens "maxLogWindowBytes bounds how much *decompressed* plaintext scanLogWindow will read". Rewrite the opening so the name and the neighbouring AV budget are both accounted for:
+In `scoring/checks.go`, the comment above the constant currently opens "maxLogScanBytes bounds how much *decompressed* plaintext scanLogWindow will read". Rewrite the opening so the name and the neighbouring AV budget are both accounted for:
 
 ```go
 // maxLogWindowBytes bounds how much *decompressed* plaintext scanLogWindow
