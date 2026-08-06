@@ -27,16 +27,17 @@ import (
 
 const (
 	// defaultMaxUploadSize is the fallback for a SubmitHandler built
-	// without MaxUploadSize. Deliberately below prd.md's "for example
-	// 10 GB": with an AV scanner wired in, anything above clamd's
-	// StreamMaxLength is guaranteed to 503, and cmd/portal and
-	// clamd.conf both standardise on this same value. Change this and you
-	// are changing what an unconfigured handler accepts but clamd won't
-	// scan — see the README section "Upload size and ClamAV".
-	//
-	// 2 GiB minus one byte, not a round 2 GiB: libclamav cannot scan a
-	// file of 2147483648 bytes or more, and no clamd setting lifts that.
-	defaultMaxUploadSize = 2147483647
+	// without MaxUploadSize — currently only cmd/portal-dev, which wires
+	// no AVScanner and no MaxUploadSize at all. The archive is no longer
+	// scanned as a file (clamd, when there is one, only ever sees
+	// extracted content: metadata.json whole, then the decompressed log
+	// in 1 GiB windows), so this value has nothing to do with clamd's
+	// StreamMaxLength or libclamav's scan ceiling — matching cmd/portal's
+	// defaultMaxUploadSize is just consistency between the production
+	// binary and the dev tool, not a scan requirement. Change this and you
+	// are changing what an unconfigured handler accepts — see the README
+	// section "Upload size and ClamAV".
+	defaultMaxUploadSize = 4294967296 // 4 GiB; matches cmd/portal's defaultMaxUploadSize
 
 	// multipartMemoryThreshold is how much of the request Go buffers in
 	// memory before spilling additional parts to its own temp files —
