@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/gnolang/gno/tm2/pkg/crypto"
@@ -350,5 +351,94 @@ func TestNewMux_RoutesSubmitProgress(t *testing.T) {
 	// the session is valid and nothing is in flight.
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 from the progress handler", resp.StatusCode)
+	}
+}
+
+// TestStaticAssets_AreRevalidatable pins the fix for a defect observed in
+// production: a validator whose browser had visited before kept running an
+// older portal.js after a deploy, so a shipped change was simply invisible
+// to them.
+//
+// The cause is that go:embed gives every file a zero ModTime, so
+// http.ServeContent omits Last-Modified, and http.FileServer generates no
+// ETag of its own — leaving the response with no validator and no freshness
+// directive at all, which lets a browser keep serving its cached copy
+// without ever asking. fstest.MapFS reproduces that exactly: its files also
+// have a zero ModTime.
+func TestStaticAssets_AreRevalidatable(t *testing.T) {
+	fsys := fstest.MapFS{
+		"portal.js": &fstest.MapFile{Data: []byte("console.log('v1');\n")},
+	}
+
+	srv := httptest.NewServer(newStaticAssets(fsys).handler())
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/portal.js")
+	if err != nil {
+		t.Fatalf("GET /portal.js: %v", err)
+	}
+	defer resp.Body.Close()
+
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag: without a validator a browser has nothing to revalidate against")
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control = %q, want \"no-cache\" so the browser always asks before reusing", got)
+	}
+
+	// Revalidation must be cheap, or "always ask" would mean re-sending
+	// every asset on every page load.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/portal.js", nil)
+	req.Header.Set("If-None-Match", etag)
+	cond, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("conditional GET: %v", err)
+	}
+	defer cond.Body.Close()
+	if cond.StatusCode != http.StatusNotModified {
+		t.Errorf("status = %d, want 304 for a matching If-None-Match", cond.StatusCode)
+	}
+}
+
+func TestStaticAssets_ETagFollowsContent(t *testing.T) {
+	// The property the whole fix rests on: change the bytes, change the
+	// validator. An ETag that survived a deploy would be worse than none.
+	v1 := newStaticAssets(fstest.MapFS{"portal.js": &fstest.MapFile{Data: []byte("console.log('v1');\n")}})
+	v2 := newStaticAssets(fstest.MapFS{"portal.js": &fstest.MapFile{Data: []byte("console.log('v2');\n")}})
+
+	if v1.etags["portal.js"] == "" {
+		t.Fatal("no ETag computed for portal.js")
+	}
+	if v1.etags["portal.js"] == v2.etags["portal.js"] {
+		t.Error("different content produced the same ETag: a deploy would stay invisible")
+	}
+}
+
+func TestStaticAssets_ServeFileAlsoRevalidates(t *testing.T) {
+	// /admin is served by its own route rather than through the file
+	// server, so it needs the same treatment — a stale admin dashboard is
+	// the same defect wearing a different hat.
+	fsys := fstest.MapFS{
+		"admin.html": &fstest.MapFile{Data: []byte("<h1>admin</h1>\n")},
+	}
+	assets := newStaticAssets(fsys)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assets.serveFile(w, r, "admin.html")
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/admin")
+	if err != nil {
+		t.Fatalf("GET /admin: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("ETag") == "" {
+		t.Error("no ETag on the admin page")
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control = %q, want \"no-cache\"", got)
 	}
 }

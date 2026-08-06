@@ -36,6 +36,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"errors"
@@ -45,6 +46,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -227,6 +229,8 @@ type muxDeps struct {
 //     sign-in page, which a browser cannot request with an
 //     Authorization header. Every /admin/* data route stays gated.
 func newMux(d muxDeps) *http.ServeMux {
+	assets := newStaticAssets(d.StaticFS)
+
 	mux := http.NewServeMux()
 	mux.Handle("/auth/challenge", auth.ChallengeHandler(d.Nonces))
 	mux.Handle("/auth/verify", auth.VerifyHandler(d.Verifier, d.Sessions))
@@ -234,15 +238,97 @@ func newMux(d muxDeps) *http.ServeMux {
 	mux.Handle("/submit", submitHandlerFor(d))
 	mux.Handle("/submit/progress", portal.ProgressHandler(d.Sessions, d.ProgressTracker))
 	mux.Handle("/admin", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, d.StaticFS, "admin.html")
+		assets.serveFile(w, r, "admin.html")
 	}))
 	mux.Handle("/admin/submissions", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminSubmissionsHandler(d.SubmissionLog, d.ScoresStore)))
 	mux.Handle("/admin/exercise", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, exercise.ConfigHandler(d.ExerciseStore)))
 	mux.Handle("POST /admin/submissions/{id}/score", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminScoreHandler(d.SubmissionLog, d.ScoresStore)))
 	mux.Handle("DELETE /admin/submissions/{id}", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminDeleteSubmissionHandler(d.SubmissionLog, d.Store, d.ScoresStore)))
 	mux.Handle("/admin/summary", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminSummaryHandler(d.SubmissionLog, d.ExerciseStore, d.ScoresStore)))
-	mux.Handle("/", http.FileServer(http.FS(d.StaticFS)))
+	mux.Handle("/", assets.handler())
 	return mux
+}
+
+// staticAssets serves the embedded frontend with a content-derived ETag and
+// Cache-Control: no-cache.
+//
+// http.FileServer alone serves them with no validator whatsoever: go:embed
+// gives every file a zero ModTime, so http.ServeContent omits Last-Modified,
+// and it never generates an ETag of its own. A response carrying neither a
+// validator nor a freshness directive leaves a browser free to keep using its
+// cached copy without ever asking — which is how a deployed change to
+// portal.js stayed invisible to a validator who had visited before. That was
+// observed in practice, not theorised.
+//
+// "no-cache" means "revalidate before reusing", not "do not store": with the
+// ETag in hand, a revalidation that finds nothing changed is a 304 with no
+// body, so always asking costs one small round trip rather than the asset.
+type staticAssets struct {
+	fsys  fs.FS
+	etags map[string]string
+}
+
+// newStaticAssets hashes every file once, at construction: the embedded
+// contents cannot change while the process runs, so there is nothing to
+// recompute per request.
+func newStaticAssets(fsys fs.FS) *staticAssets {
+	etags := make(map[string]string)
+
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		etags[path] = `"` + hex.EncodeToString(sum[:16]) + `"`
+		return nil
+	})
+	if err != nil {
+		// Not fatal: the assets still serve, they just revalidate the way
+		// they did before this existed. Failing to start over a hashing
+		// problem would be a worse trade than serving a stale-able page.
+		log.Printf("static assets: unable to compute cache validators, falling back to unvalidated responses: %v", err)
+	}
+
+	return &staticAssets{fsys: fsys, etags: etags}
+}
+
+func (s *staticAssets) handler() http.Handler {
+	files := http.FileServer(http.FS(s.fsys))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if name == "" || name == "." {
+			name = "index.html"
+		}
+		s.setValidators(w, name)
+		files.ServeHTTP(w, r)
+	})
+}
+
+// serveFile is for the routes that serve one named asset directly rather
+// than through the file server — /admin, whose page a browser cannot request
+// with an Authorization header and so cannot go through the gated routes.
+func (s *staticAssets) serveFile(w http.ResponseWriter, r *http.Request, name string) {
+	s.setValidators(w, name)
+	http.ServeFileFS(w, r, s.fsys, name)
+}
+
+// setValidators is a no-op for a name with no precomputed digest, so an
+// unknown path still 404s through the file server rather than being handed
+// a validator for content that does not exist.
+func (s *staticAssets) setValidators(w http.ResponseWriter, name string) {
+	etag, ok := s.etags[name]
+	if !ok {
+		return
+	}
+	// Set before delegating: http.ServeContent reads the ETag back out of
+	// the header map to answer If-None-Match itself.
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
 }
 
 // submitHandlerFor builds the upload handler newMux serves at /submit.
