@@ -1,7 +1,9 @@
 package portal
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,6 +12,41 @@ import (
 
 	"github.com/samourai/validator-diagnostics/auth"
 )
+
+// TestCountingSeeker_SeekReportsDeltaNotRawCount is the unit-level check on
+// the byte accounting the storage-seam regression test in submit_test.go
+// doesn't itself exercise: the AWS SDK's retry middleware rewinds to 0 and
+// re-reads the whole body after a transient failure. A wrapper that only
+// ever added on Read would double the published count for every retried
+// byte; reporting Seek's delta instead keeps the published total equal to
+// the wrapped reader's actual current offset.
+func TestCountingSeeker_SeekReportsDeltaNotRawCount(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), 10)
+	var total int64
+	cs := &countingSeeker{r: bytes.NewReader(data), add: func(n int64) { total += n }}
+
+	buf := make([]byte, 10)
+	if n, err := cs.Read(buf); err != nil || n != 10 {
+		t.Fatalf("first read: n=%d err=%v, want 10 bytes, no error", n, err)
+	}
+	if total != 10 {
+		t.Fatalf("after first read: total=%d, want 10", total)
+	}
+
+	if _, err := cs.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if total != 0 {
+		t.Fatalf("after rewind to 0: total=%d, want 0 (published count tracks the current offset)", total)
+	}
+
+	if n, err := cs.Read(buf); err != nil || n != 10 {
+		t.Fatalf("re-read: n=%d err=%v, want 10 bytes, no error", n, err)
+	}
+	if total != 10 {
+		t.Fatalf("after re-read: total=%d, want 10, not 20 — a naive add-only wrapper would double-count the retry", total)
+	}
+}
 
 func TestProgressTracker_BeginGetDone(t *testing.T) {
 	tracker := NewProgressTracker()

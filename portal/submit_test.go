@@ -22,6 +22,7 @@ import (
 	"github.com/samourai/validator-diagnostics/clamav"
 	"github.com/samourai/validator-diagnostics/exercise"
 	"github.com/samourai/validator-diagnostics/scoring"
+	"github.com/samourai/validator-diagnostics/storage"
 )
 
 // fakeStore is an in-memory storage.Store, so these tests don't need
@@ -276,6 +277,79 @@ func TestSubmitHandler_StoresOriginalBytesAfterCleanScan(t *testing.T) {
 	}
 	if !bytes.Equal(saved, archive) {
 		t.Errorf("stored %d bytes, want the %d uploaded bytes unchanged", len(saved), len(archive))
+	}
+}
+
+// TestSubmitHandler_StoresViaRealS3StoreOverPlainHTTP is the regression test
+// for the storing phase's progress wrapper. fakeStore accepts any io.Reader,
+// so it never noticed that Store.Save was handed a reader that couldn't
+// seek: every other test in this file stores through fakeStore and would
+// stay green either way. storage.S3Store hands its body straight to the AWS
+// SDK's PutObject, whose checksum middleware refuses a non-seekable stream
+// over plain HTTP — exactly docker-compose.yml's configuration
+// (-s3-endpoint=http://minio:9001) — so this drives a real *storage.S3Store
+// against a plain-HTTP httptest server, the same fake-server pattern
+// storage/s3_test.go uses, instead of a double. That is the only way to
+// actually exercise the AWS SDK's seekability requirement rather than assert
+// around it.
+func TestSubmitHandler_StoresViaRealS3StoreOverPlainHTTP(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	token := sessions.Issue(operatorAddr)
+
+	var gotBody []byte
+	fakeS3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("fake S3 server: reading request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		gotBody = body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fakeS3.Close()
+
+	store, err := storage.NewS3Store(context.Background(), storage.S3Config{
+		Bucket:    "validator-fire-drill",
+		Region:    "fr-par",
+		AccessKey: "test-access-key",
+		SecretKey: "test-secret-key",
+		Endpoint:  fakeS3.URL, // plain http://, deliberately: this is the configuration that breaks
+	})
+	if err != nil {
+		t.Fatalf("NewS3Store: %v", err)
+	}
+
+	handler := &SubmitHandler{Sessions: sessions, Store: store}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	archive := buildValidArchive(t, operatorAddr.String())
+	filename := "samourai-20260709-1830UTC.tar.gz"
+	body, contentType := multipartUpload(t, filename, archive)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result submitResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !result.OK {
+		t.Fatalf("submit failed: status=%d ok=%v err=%q — this is the exact failure mode docker-compose.yml hits "+
+			"(a plain-HTTP S3 endpoint) if the storing phase's wrapper around the multipart.File doesn't forward Seek",
+			resp.StatusCode, result.OK, result.Error)
+	}
+	if !bytes.Equal(gotBody, archive) {
+		t.Error("the fake S3 server did not receive the uploaded archive's exact bytes")
 	}
 }
 

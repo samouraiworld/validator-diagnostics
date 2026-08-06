@@ -271,7 +271,11 @@ func (s countingScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict,
 }
 
 // countingReader reports bytes as they are read, for phases whose progress is
-// otherwise invisible from outside.
+// otherwise invisible from outside. It wraps a plain io.Reader on purpose:
+// the antivirus path wraps a gzip stream, which is genuinely not seekable,
+// and giving it a Seek method that fails at runtime would advertise a
+// capability it does not have — see countingSeeker for the storage path,
+// which does need one.
 type countingReader struct {
 	r   io.Reader
 	add func(int64)
@@ -283,4 +287,47 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		c.add(int64(n))
 	}
 	return n, err
+}
+
+// countingSeeker is countingReader's counterpart for the storage path, which
+// wraps a multipart.File — genuinely seekable, and storage.S3Store.Save
+// depends on that: the AWS SDK's checksum middleware refuses a non-seekable
+// body over plain HTTP, and its retry middleware rewinds and re-reads a
+// seekable one after a transient failure. A single type that tried to cover
+// both call sites would either hide a gzip stream's real non-seekability
+// (the antivirus path) or hide a multipart.File's real seekability (this
+// one) — so this is deliberately a second type, not a flag on the first.
+//
+// offset tracks the wrapper's own position so Seek reports the delta to the
+// new position, not the raw byte count: the SDK seeks back to 0 and re-reads
+// on retry, and a wrapper that only ever adds on Read would double-count
+// every retried byte. Reporting the delta keeps the published count equal to
+// the current offset, matching what the wrapped reader has actually done.
+type countingSeeker struct {
+	r      io.ReadSeeker
+	add    func(int64)
+	offset int64
+}
+
+func (c *countingSeeker) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.offset += int64(n)
+		c.add(int64(n))
+	}
+	return n, err
+}
+
+// Seek forwards to the wrapped seeker and reports the change in position —
+// which may be negative, on a rewind — rather than the magnitude of the
+// jump, so repeated seeks never drift the published count away from the
+// wrapped reader's actual offset.
+func (c *countingSeeker) Seek(offset int64, whence int) (int64, error) {
+	newOffset, err := c.r.Seek(offset, whence)
+	if err != nil {
+		return newOffset, err
+	}
+	c.add(newOffset - c.offset)
+	c.offset = newOffset
+	return newOffset, nil
 }

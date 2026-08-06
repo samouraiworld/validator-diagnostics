@@ -240,8 +240,15 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// file is seekable (see the comment above ValidateArchive) and
+	// storage.S3Store.Save depends on that — its checksum middleware
+	// requires a seekable body over plain HTTP, and its retry middleware
+	// rewinds one after a transient failure — so this is wrapped in
+	// countingSeeker, which forwards Seek, not the plain countingReader
+	// the antivirus path above uses for its genuinely non-seekable gzip
+	// stream.
 	progress.Phase(PhaseStoring, header.Size)
-	if err := h.Store.Save(r.Context(), header.Filename, &countingReader{r: file, add: progress.Add}, header.Size); err != nil {
+	if err := h.Store.Save(r.Context(), header.Filename, &countingSeeker{r: file, add: progress.Add}, header.Size); err != nil {
 		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to store archive"})
 		return
 	}
