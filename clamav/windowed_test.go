@@ -220,23 +220,27 @@ func TestWindowedScanner_BudgetExactlyEqualToStream(t *testing.T) {
 	}
 }
 
-func TestWindowedScanner_SourceErrorOnHeadPeekIsNotEOF(t *testing.T) {
+func TestWindowedScanner_SourceErrorOnHeadPeekIsPartialCoverage(t *testing.T) {
 	// Targets the head peek: 100 bytes is exactly one full window (capacity
 	// 100, tail empty), so the source only errors when ScanStream tries to
-	// read the *next* window's leading byte. A stream that failed there must
-	// not be folded into "the stream ended" — that would leave callers
-	// unable to tell a broken source from a clean one.
+	// read the *next* window's leading byte. That is a broken source, not a
+	// broken scanner — the window that already came back with a verdict is
+	// still credited, and the loop ends with partial coverage instead of an
+	// error.
 	sentinel := errors.New("disk read failed")
 	fake := &recordingScanner{}
 	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 10000}
 
 	src := &failingReader{data: seq(100), err: sentinel}
 	_, cov, err := w.ScanStream(context.Background(), src)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("err = %v, want %v", err, sentinel)
+	if err != nil {
+		t.Fatalf("err = %v, want nil: a broken source is recorded, not rejected", err)
 	}
-	if cov != (Coverage{}) {
-		t.Errorf("Coverage = %+v, want zero: a broken source covered nothing it can vouch for", cov)
+	if cov.Complete {
+		t.Error("Complete = true, want false")
+	}
+	if cov.Bytes != 100 {
+		t.Errorf("Bytes = %d, want 100: the one completed window is still credited", cov.Bytes)
 	}
 	if len(fake.windows) != 1 {
 		t.Errorf("got %d windows, want 1: the second window's head peek should have failed before any Scan call", len(fake.windows))
@@ -247,8 +251,11 @@ func TestWindowedScanner_SourceErrorOnCompletionProbeIsNotComplete(t *testing.T)
 	// Targets the completion probe: 190 bytes at a budget of 190 empties
 	// bounded.N exactly when the source also runs out (same geometry as
 	// BudgetExactlyEqualToStream), so the loop exits cleanly via bounded's
-	// own io.EOF and complete() has to probe r directly. That probe hits
-	// the source's error, which must read as "not complete", not "complete".
+	// own io.EOF — never touching the source, so errRecorder has nothing to
+	// report yet — and complete() has to probe the source directly. That
+	// probe hits the source's error, which must read as "not complete", not
+	// "complete", while still leaving ScanStream's own error nil: this is a
+	// broken source, not a broken scanner.
 	sentinel := errors.New("disk read failed")
 	fake := &recordingScanner{}
 	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 190}
@@ -263,6 +270,60 @@ func TestWindowedScanner_SourceErrorOnCompletionProbeIsNotComplete(t *testing.T)
 	}
 	if cov.Bytes != 190 {
 		t.Errorf("Bytes = %d, want 190", cov.Bytes)
+	}
+}
+
+func TestWindowedScanner_SourceFailureIsPartialCoverageNotAnError(t *testing.T) {
+	fake := &recordingScanner{}
+	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 10000}
+
+	// 150 readable bytes: window 1 (100 fresh) completes and is verdicted,
+	// window 2 breaks partway through.
+	src := &failingReader{data: seq(150), err: errors.New("unexpected EOF")}
+
+	verdict, cov, err := w.ScanStream(context.Background(), src)
+	if err != nil {
+		t.Fatalf("err = %v, want nil: a broken source is recorded, not rejected", err)
+	}
+	if verdict.Infected {
+		t.Error("Infected = true, want false")
+	}
+	if cov.Complete {
+		t.Error("Complete = true, want false")
+	}
+	if cov.Bytes != 100 {
+		t.Errorf("Bytes = %d, want 100: the interrupted window was never verdicted, so it is not credited", cov.Bytes)
+	}
+}
+
+func TestWindowedScanner_SourceFailureOnTheFirstWindow(t *testing.T) {
+	fake := &recordingScanner{}
+	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 10000}
+
+	src := &failingReader{data: seq(20), err: errors.New("unexpected EOF")}
+
+	_, cov, err := w.ScanStream(context.Background(), src)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if cov.Complete || cov.Bytes != 0 {
+		t.Errorf("Coverage = %+v, want {Complete:false Bytes:0}", cov)
+	}
+}
+
+func TestWindowedScanner_ScannerErrorStillWinsOverACleanSource(t *testing.T) {
+	// The guard against over-generalising the previous two tests: with the
+	// source healthy, a scanner error must still be an error.
+	sentinel := errors.New("clamd is down")
+	fake := &recordingScanner{errs: []error{nil, sentinel}}
+	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 10000}
+
+	_, cov, err := w.ScanStream(context.Background(), bytes.NewReader(seq(500)))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want %v", err, sentinel)
+	}
+	if cov != (Coverage{}) {
+		t.Errorf("Coverage = %+v, want zero", cov)
 	}
 }
 

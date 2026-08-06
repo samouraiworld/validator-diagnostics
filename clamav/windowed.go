@@ -76,7 +76,13 @@ type WindowedScanner struct {
 func (w WindowedScanner) ScanStream(ctx context.Context, r io.Reader) (Verdict, Coverage, error) {
 	windowSize, overlap, budget := w.windowSize(), w.overlap(), w.budget()
 
-	bounded := &io.LimitedReader{R: r, N: budget}
+	// Windows are read by the Scanner, not by this loop, so a broken source
+	// would otherwise surface only as whatever error Scan happens to return
+	// — indistinguishable from the antivirus daemon being down. src records
+	// that the failure was the source's, so every error return below can
+	// tell the two apart and give each its own outcome.
+	src := &errRecorder{r: r}
+	bounded := &io.LimitedReader{R: src, N: budget}
 
 	var tail []byte
 	var scanned int64
@@ -88,17 +94,13 @@ func (w WindowedScanner) ScanStream(ctx context.Context, r io.Reader) (Verdict, 
 
 		// One byte before building the window, so a stream whose length is
 		// an exact multiple of the window capacity doesn't end with a
-		// window holding nothing but the previous one's overlap.
+		// window holding nothing but the previous one's overlap. Zero bytes
+		// ends the loop either way — whether that was the stream genuinely
+		// ending or the source breaking is decided below, from src.err, not
+		// from this read directly.
 		var head [1]byte
-		n, err := io.ReadFull(bounded, head[:])
+		n, _ := io.ReadFull(bounded, head[:])
 		if n == 0 {
-			// Zero bytes and io.EOF means the stream genuinely ended; zero
-			// bytes and any other error means r broke. Those are not the
-			// same fact, and folding the latter into "ended" would let a
-			// scan that never finished get reported as complete.
-			if err != nil && err != io.EOF {
-				return Verdict{}, Coverage{}, err
-			}
 			break
 		}
 
@@ -112,6 +114,13 @@ func (w WindowedScanner) ScanStream(ctx context.Context, r io.Reader) (Verdict, 
 
 		verdict, err := w.Scanner.Scan(ctx, window)
 		if err != nil {
+			if src.err != nil {
+				// The source broke, not the scanner. The window being fed
+				// when it broke was never verdicted, so its bytes are not
+				// counted and the loop ends with incomplete coverage
+				// instead of an error.
+				return Verdict{}, Coverage{Bytes: scanned}, nil
+			}
 			return Verdict{}, Coverage{}, err
 		}
 
@@ -119,6 +128,9 @@ func (w WindowedScanner) ScanStream(ctx context.Context, r io.Reader) (Verdict, 
 		// this drain the byte count and the next window's alignment would
 		// depend on how much the implementation chose to consume.
 		if _, err := io.Copy(io.Discard, window); err != nil {
+			if src.err != nil {
+				return Verdict{}, Coverage{Bytes: scanned}, nil
+			}
 			return Verdict{}, Coverage{}, err
 		}
 
@@ -133,7 +145,10 @@ func (w WindowedScanner) ScanStream(ctx context.Context, r io.Reader) (Verdict, 
 		tail = ring.bytes()
 	}
 
-	return Verdict{}, Coverage{Complete: w.complete(bounded, r), Bytes: scanned}, nil
+	// A recorded source error can never be reported as complete, regardless
+	// of what complete's own probe would say — the loop above only reaches
+	// here after src has already had every chance to set it.
+	return Verdict{}, Coverage{Complete: src.err == nil && w.complete(bounded, src), Bytes: scanned}, nil
 }
 
 // complete reports whether the loop stopped because the stream genuinely
@@ -180,6 +195,24 @@ func (w WindowedScanner) budget() int64 {
 		return DefaultScanBudget
 	}
 	return w.Budget
+}
+
+// errRecorder remembers the first non-EOF read error the wrapped reader
+// produced. ScanStream needs it because the windows are read by the Scanner,
+// so a failure of the source arrives as an error returned by Scan — the same
+// shape as a daemon that is down, and the opposite outcome: a truncated log
+// is an accepted submission with partial coverage, a dead daemon is a 503.
+type errRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errRecorder) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && err != io.EOF {
+		e.err = err
+	}
+	return n, err
 }
 
 // tailBuffer keeps the last size bytes written to it and discards the rest,
