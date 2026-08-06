@@ -153,19 +153,45 @@ If `Overlap >= WindowSize` — only reachable via an explicitly wrong caller
 configuration — the scanner clamps `Overlap` to `WindowSize / 2` so the window
 capacity stays positive and the loop terminates.
 
+### Telling a broken source from a broken scanner
+
+The windows are read *by* the underlying `Scanner`, so a read failure on `r` —
+a gzip stream that turns out to be truncated — reaches `ScanStream` as an error
+returned by `Scan`, indistinguishable at that point from clamd being down.
+`ClamdScanner` even wraps it (`clamav: reading input: %w`). The two must lead to
+opposite outcomes: a broken daemon is a 503, a truncated log is an accepted
+submission with partial coverage.
+
+`ScanStream` therefore wraps `r` in a reader that records the first read error
+it sees. When `Scan` returns an error, the recorder decides:
+
+- **recorder holds an error** → the source broke. End the loop, return a nil
+  error and `Complete: false`.
+- **recorder is empty** → the scanner failed. Return the error unchanged.
+
+Bytes from the window that was interrupted are **not** counted. That window's
+INSTREAM session was aborted mid-write, so clamd never issued a verdict on it;
+`Coverage.Bytes` stops at the end of the last window that returned one.
+
 ### Return values
 
 | Outcome | Verdict | Coverage | error |
 | --- | --- | --- | --- |
 | Stream fully scanned, clean | zero | `{Complete: true, Bytes: n}` | nil |
 | Budget exhausted, clean so far | zero | `{Complete: false, Bytes: budget}` | nil |
-| Infected in window k | `{Infected, Signature}` | `{Complete: false, Bytes: bytes through window k}` | nil |
+| Source read failed mid-stream | zero | `{Complete: false, Bytes: through the last verdicted window}` | nil |
+| Infected in window k | `{Infected, Signature}` | `{Complete: false, Bytes: through window k}` | nil |
 | Underlying `Scan` failed | zero | zero | non-nil |
 | Context cancelled | zero | zero | `ctx.Err()` |
 
 An infected verdict returns immediately: windows after the detection are never
 scanned. Coverage is still reported honestly rather than zeroed, even though
 the caller rejects the submission and ignores it.
+
+Note that the two incomplete-but-accepted outcomes stay distinguishable from
+the numbers alone, without a third field: `Bytes == Budget` means the budget
+ran out, `Bytes < Budget` means the stream broke. That is what lets the portal
+log a useful reason without persisting one.
 
 ## 2. The scan path in `/submit`
 
@@ -193,16 +219,44 @@ score → record the log entry. The scan stays before `Store.Save`, so infected
 content is never stored. `Coverage` is captured in a variable declared before
 the scan block and read when the `Entry` is built, which already happens last.
 
+### `AVScanner` nil means no scan, and no claim
+
+The whole block stays behind the existing `if h.AVScanner != nil` guard, and
+that guard now carries more weight than it used to: it is what keeps the
+dashboard from asserting anything about a submission nothing examined. When it
+is nil, no scan runs and `Entry.Scan` stays nil.
+
+`cmd/portal-dev/main.go:55` already builds a `SubmitHandler` with no
+`AVScanner`, so nil is a real configuration and not only a test shortcut —
+`portal/submit.go`'s field comment, which claims "nil only shows up in tests
+that don't care about the AV step", is already wrong and is corrected.
+
+**`cmd/portal` stops falling back to `clamav.NoopScanner`.** With
+`-clamav-addr` unset it leaves `AVScanner` nil instead. Without this change the
+no-op scanner would return a clean verdict over every window and produce
+`Coverage{Complete: true}`, so the dashboard would render `scan ✓` on a
+submission no antivirus ever looked at — reintroducing at the presentation
+layer exactly the silent fail-open the windowed scan exists to avoid. The
+startup warning `log.Println` is unchanged; it is still the thing that tells an
+operator scanning is off.
+
+`NoopScanner` stays in the `clamav` package for tests, where a scanner that
+reports clean and claims coverage is precisely what is wanted. As a bonus, the
+production binary no longer decompresses the whole log to feed a scanner that
+discards it.
+
 ### Response codes
 
 | Condition | Status | Change |
 | --- | --- | --- |
 | `metadata.json` or any log window infected | 422 | unchanged shape |
-| Any `Scan` returns an error | 503, logged | unchanged |
-| `gzip.NewReader` fails, or the log's gzip stream errors mid-read | **400** | new |
-| Budget exhausted before EOF | 200, coverage recorded incomplete | new |
+| A `Scan` returns an error not attributable to the source | 503, logged | unchanged |
+| `gzip.NewReader` fails on the log entry | **400** | new |
+| The log's gzip stream breaks mid-read | 200, coverage incomplete, logged | new |
+| Budget exhausted before EOF | 200, coverage incomplete, logged | new |
+| `AVScanner` nil | 200, `Entry.Scan` nil | new |
 
-### The new 400
+### Corrupt and truncated logs
 
 `ValidateArchive` checks only the two gzip magic bytes of `gnoland.log.gz`; it
 never decompresses the entry. A corrupt or truncated inner gzip therefore
@@ -211,21 +265,26 @@ passes validation and the AV scan today, and surfaces only as a zero-valued
 [`scoring.scanLogWindow`](../../../scoring/checks.go) treats a gzip error as
 "no timestamps found" by design.
 
-Once the AV scan reads that stream, a decompression failure means the log
-cannot be extracted, and content that cannot be extracted cannot be scanned.
-Fail-closed requires rejecting it rather than storing it, so this becomes a 400
-with a message naming `gnoland.log.gz`. This is a deliberate hardening, not an
-incidental side effect: it moves a class of malformed upload from
-"stored, quietly scored low" to "rejected with a reason". It applies equally to
-a stream that fails partway through, after several windows have already come
-back clean.
+Once the AV pass actually reads that stream, the two failure shapes stop being
+the same thing, and they are handled differently:
 
-### A cost accepted in development
+- **`gzip.NewReader` fails outright** — the header is not a gzip header, even
+  though `ValidateArchive` accepted its first two bytes. Nothing was ever
+  readable, so nothing can be scanned, and storing it would be a fail-open on
+  a file whose content is entirely unexamined. **400**, naming
+  `gnoland.log.gz`.
+- **The stream breaks partway through** — the header parsed and some windows
+  came back clean before the read failed. This is what a full disk, a killed
+  collection process, or an interrupted `tar` actually produces, and it is not
+  an exotic case. The submission is **accepted** and recorded with
+  `Complete: false`, exactly like an exhausted budget: what was scanned was
+  scanned, and the exercise keeps a diagnostic it can still use. Scoring reads
+  the same broken stream afterwards and reports `Truncated`, awarding partial
+  credit — unchanged from today.
 
-With `-clamav-addr` unset, `cmd/portal` wires `clamav.NoopScanner`, which
-drains its input. The log is therefore fully decompressed even with no daemon
-in the loop. On development-sized archives this is negligible, and avoiding it
-would require type-switching on `NoopScanner` inside the scan path.
+The rule is: accept what could be read, reject what could never be started.
+The portal logs the incomplete coverage either way, deriving the reason from
+`Bytes` against the configured budget.
 
 ## 3. Recording the coverage
 
@@ -239,21 +298,25 @@ type Entry struct {
 	Filename        string    `json:"filename"`
 	SubmittedAt     time.Time `json:"submitted_at"`
 
-	// Scan is what the antivirus actually examined. Nil means unknown:
-	// either the entry predates windowed scanning, or no scanner was
-	// wired. Never "not scanned" — a scan that fails or finds something
-	// fails the submission outright, so no Entry is written at all.
+	// Scan is what the antivirus actually examined. Non-nil is an
+	// affirmative claim: a real Scanner was wired and returned a verdict
+	// over Bytes bytes of extracted content. Nil claims nothing — either
+	// the entry predates windowed scanning, or no scanner was wired at
+	// all. Nothing in between: a scan that errors or finds something
+	// fails the submission outright, so no Entry is written for it.
 	Scan *clamav.Coverage `json:"scan,omitempty"`
 }
 ```
 
-A pointer, not a value: `submissions.jsonl` is append-only and already holds
-entries written before this change. With a flat `bool`, those legacy lines
-would decode as `complete: false` and render as partially scanned when they
-were in fact scanned in full by the old whole-archive path. `nil` says
-"unknown", which is the only true statement about them. It is the same
-convention `AdminSubmission.Score *scoring.Result` already uses for
-"no record yet".
+A pointer, not a value, for two reasons that happen to want the same thing.
+`submissions.jsonl` is append-only and already holds entries written before
+this change; with a flat `bool` those legacy lines would decode as
+`complete: false` and render as partially scanned when the old whole-archive
+path in fact scanned them in full. And a nil `AVScanner` has to be expressible
+as "no claim" rather than as any value of `Complete`, which is what stops the
+dashboard from vouching for an unscanned submission. `nil` says "unknown",
+the only true statement in both cases. It is the same convention
+`AdminSubmission.Score *scoring.Result` already uses for "no record yet".
 
 The field reuses `clamav.Coverage` rather than declaring a parallel
 `portal.ScanCoverage`. `portal` already imports `clamav`, and one type with one
@@ -296,8 +359,15 @@ decompressing to find timestamps the first and last lines already give.
 - The AV budget is `-av-scan-budget` / `AV_SCAN_BUDGET`, prefixed so it is
   unmistakably the antivirus one.
 
-The rename is mechanical: the constant, its doc comment, and its two use sites
-in `scoring/checks.go`.
+The rename is mechanical but wider than `scoring/checks.go`. Every site:
+
+| File | Line | What |
+| --- | --- | --- |
+| `scoring/checks.go` | 15, 31 | the doc comment and the constant |
+| `scoring/checks.go` | 69, 79 | the use in `AutoChecks` and a doc comment in `scanLogWindow` |
+| `scoring/score.go` | 70 | a comment naming the budget in `LogQualityScore`'s reasoning |
+| `scoring/checks_test.go` | 180, 199 | two call sites |
+| `cmd/portal/main.go` | 84 | `defaultMaxLogSize`'s comment |
 
 ### Text that this change makes wrong
 
@@ -329,8 +399,9 @@ in `scoring/checks.go`.
   configuration tables, and a rewrite of "Upload size and ClamAV" / "The 2 GiB
   wall". The wall is still real and still worth documenting — it is why the
   window is 1 GiB — but it now bounds a window rather than an upload. The
-  section gains a short description of the windowed scan and of what a
-  partially scanned submission means.
+  section gains a short description of the windowed scan, of what a partially
+  scanned submission means, and of the fact that with `-clamav-addr` unset the
+  dashboard shows no scan badge at all rather than a reassuring one.
 
 ## 5. Admin dashboard
 
@@ -341,7 +412,7 @@ been scored.
 
 | `s.scan` | Badge |
 | --- | --- |
-| absent | none — unknown, not a claim either way |
+| absent | none — legacy entry, or no scanner wired; no claim either way |
 | `complete` true | `badge("ok", "scan ✓")` |
 | `complete` false | `badge("caution", "scan partiel — 32 GiB")`, with the real byte count |
 
@@ -377,6 +448,12 @@ assertable at all:
   which is the only way to prove the overlap does its job without a real clamd.
 - Infected in window 2: returns immediately, window 3 is never scanned.
 - A scanner error is propagated and coverage is zero.
+- **A source reader that fails mid-window** — the fake scanner surfaces the
+  read error just as `ClamdScanner` would — returns a nil error,
+  `Complete: false`, and `Bytes` equal to the end of the *previous* window: the
+  interrupted one is not credited.
+- The same test with the source failing on the very first window yields
+  `Bytes: 0` and still no error.
 - A scanner that reads only part of its window: windows still align and the
   byte count is unchanged, proving the drain.
 - A cancelled context stops the loop and returns `ctx.Err()`.
@@ -386,11 +463,19 @@ assertable at all:
 - `metadata.json` is scanned first, with exactly the metadata bytes.
 - The log is scanned decompressed, not as the raw archive.
 - Infected log → 422, and nothing reaches the store.
-- Corrupt inner gzip → 400, and nothing reaches the store.
-- Scanner error on a log window → 503.
+- A `gnoland.log.gz` whose first two bytes are the gzip magic but whose header
+  is otherwise garbage → 400, and nothing reaches the store.
+- A truncated `gnoland.log.gz` → 200, stored, `Entry.Scan.Complete` false with
+  `Bytes` below the budget.
+- Scanner error on a log window → 503, and nothing reaches the store.
 - Happy path → 200, `Entry.Scan.Complete` true and `Bytes` equal to the
   decompressed log length.
-- Budget exhausted → 200, `Entry.Scan.Complete` false.
+- Budget exhausted → 200, `Entry.Scan.Complete` false with `Bytes` equal to the
+  budget.
+- **`AVScanner` nil → 200, no scan attempted, `Entry.Scan` nil.** This is the
+  regression guard for the dashboard vouching for an unscanned submission, and
+  it is also what the existing handler tests built without an `AVScanner`
+  exercise implicitly.
 - The existing end-to-end scoring test still produces the same
   `scoring.Result`: the AV pass and the scoring pass read the archive
   independently and must not interfere.
