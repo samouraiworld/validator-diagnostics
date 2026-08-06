@@ -164,6 +164,20 @@ document.getElementById("admin-verify-signature").addEventListener("click", asyn
   startDashboard();
 });
 
+function formatBytes(n) {
+  // Divides by 1024, so the labels are the binary units (MiB/GiB), not the
+  // decimal ones (MB/GB) — matches the README, .env.example, and the
+  // upload page's own help text, which all quote limits in MiB/GiB.
+  //
+  // Duplicated from portal.js rather than shared: the two files serve
+  // different pages and this project has no module bundler.
+  const mib = n / (1024 * 1024);
+  if (mib >= 1024) {
+    return (mib / 1024).toFixed(1) + " GiB";
+  }
+  return mib.toFixed(1) + " MiB";
+}
+
 // state is "ok", "caution", or "warn". Caution exists because some
 // checks have a real middle outcome — a log the scan could only
 // partially verify is not the same as one that failed.
@@ -350,6 +364,23 @@ async function refresh({ force = false } = {}) {
 
     const checksCell = document.createElement("td");
     checksCell.className = "checks-cell";
+
+    // Coverage is a property of the submission, not of the score, so this
+    // sits outside the scored guard below. An absent s.scan is not a claim
+    // either way: the entry predates windowed scanning, or no scanner was
+    // wired. Never render anything reassuring for it.
+    if (s.scan) {
+      if (s.scan.complete) {
+        checksCell.appendChild(badge("ok", "scan ✓"));
+      } else {
+        const partial = badge("caution", `scan partiel — ${formatBytes(s.scan.bytes)}`);
+        partial.title =
+          "The antivirus stopped before the end of the log — the budget ran out, " +
+          "or the log's stream broke. The rest of it was never examined.";
+        checksCell.appendChild(partial);
+      }
+    }
+
     if (s.score && s.score.scored) {
       const w = s.score.log_window;
       let logState = "warn";
