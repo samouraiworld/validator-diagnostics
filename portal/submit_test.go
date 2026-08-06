@@ -83,7 +83,19 @@ func (f fakeScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, err
 	return f.verdict, f.err
 }
 
+// buildValidArchive is buildArchiveWithLog carrying a genuinely
+// decompressible gnoland.log.gz. The AV pass reads that stream now, so the
+// hand-rolled two-magic-bytes stand-in this used to write would be rejected
+// as an unreadable log rather than exercising the happy path.
 func buildValidArchive(t *testing.T, validatorAddress string) []byte {
+	t.Helper()
+	return buildArchiveWithLog(t, validatorAddress, gzipBytes(t, []byte("fake gzip log payload")))
+}
+
+// buildArchiveWithLog builds the same archive with the gnoland.log.gz
+// entry's raw bytes under the caller's control, so a test can supply a
+// broken or truncated gzip.
+func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byte) []byte {
 	t.Helper()
 
 	metadata := []byte(`{
@@ -100,7 +112,6 @@ func buildValidArchive(t *testing.T, validatorAddress string) []byte {
 		"deployment_method": "docker",
 		"recent_operations": "None"
 	}`)
-	logContent := append([]byte{0x1f, 0x8b}, []byte("fake gzip log payload")...)
 
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -129,6 +140,20 @@ func buildValidArchive(t *testing.T, validatorAddress string) []byte {
 		t.Fatalf("gzip Close: %v", err)
 	}
 
+	return buf.Bytes()
+}
+
+func gzipBytes(t *testing.T, content []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(content); err != nil {
+		t.Fatalf("gzip Write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
 	return buf.Bytes()
 }
 
@@ -632,5 +657,245 @@ func TestSubmitHandler_ScoresPendingWhenExerciseNotConfigured(t *testing.T) {
 	}
 	if result.Scored {
 		t.Error("Scored = true, want false when the exercise wasn't configured at submit time")
+	}
+}
+
+// submitArchive posts archive to a server wrapping handler and returns the
+// response status. handler's Sessions must be sessions.
+func submitArchive(t *testing.T, handler *SubmitHandler, sessions *auth.SessionSigner, addr crypto.Address, archive []byte) int {
+	t.Helper()
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, contentType := multipartUpload(t, "samourai-20260709-1830UTC.tar.gz", archive)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+sessions.Issue(addr))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /submit: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+// capturingScanner records every stream it is handed, so the tests can
+// assert what clamd would actually have received.
+type capturingScanner struct {
+	mu       sync.Mutex
+	streams  [][]byte
+	verdicts []clamav.Verdict
+	errs     []error
+}
+
+func (s *capturingScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, error) {
+	data, err := io.ReadAll(r)
+	s.mu.Lock()
+	i := len(s.streams)
+	s.streams = append(s.streams, data)
+	s.mu.Unlock()
+	if err != nil {
+		return clamav.Verdict{}, err
+	}
+	if i < len(s.errs) && s.errs[i] != nil {
+		return clamav.Verdict{}, s.errs[i]
+	}
+	if i < len(s.verdicts) {
+		return s.verdicts[i], nil
+	}
+	return clamav.Verdict{}, nil
+}
+
+func (s *capturingScanner) captured() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streams
+}
+
+func TestSubmitHandler_ScansExtractedContentNotTheArchive(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	scanner := &capturingScanner{}
+	submissionLog := &fakeLog{}
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     newFakeStore(),
+		Log:       submissionLog,
+		AVScanner: scanner,
+	}
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, buildValidArchive(t, operatorAddr.String())); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	streams := scanner.captured()
+	if len(streams) != 2 {
+		t.Fatalf("got %d scans, want 2 (metadata.json, then the log)", len(streams))
+	}
+	if !bytes.Contains(streams[0], []byte(`"moniker": "samourai"`)) {
+		t.Error("the first scan is not metadata.json")
+	}
+	if string(streams[1]) != "fake gzip log payload" {
+		t.Errorf("the second scan is %q, want the decompressed log — clamd must never see compressed or archived bytes", streams[1])
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a coverage claim")
+	}
+	if !got.Complete || got.Bytes != int64(len("fake gzip log payload")) {
+		t.Errorf("Scan = %+v, want complete coverage of the decompressed log", *got)
+	}
+}
+
+func TestSubmitHandler_RejectsUnreadableLogGzip(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		AVScanner: &capturingScanner{},
+	}
+
+	// The right magic bytes over a header that is not a gzip header:
+	// ValidateArchive accepts it, and nothing beyond it can ever be read.
+	broken := append([]byte{0x1f, 0x8b}, []byte("not really a gzip header at all")...)
+	archive := buildArchiveWithLog(t, operatorAddr.String(), broken)
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, archive); status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: a log nothing can read is a log nothing can scan", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("the archive was stored despite being entirely unscanned")
+	}
+}
+
+func TestSubmitHandler_AcceptsTruncatedLogWithPartialCoverage(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		Log:       submissionLog,
+		AVScanner: &capturingScanner{},
+	}
+
+	// A real gzip stream with its tail cut off — a full disk or a killed
+	// collection process, not an exotic case. The exercise wants the
+	// diagnostic it can still read.
+	full := gzipBytes(t, []byte("a log that was being written when the disk filled up"))
+	archive := buildArchiveWithLog(t, operatorAddr.String(), full[:len(full)-8])
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: what could be read was read", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); !ok {
+		t.Error("the archive was not stored")
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a partial coverage claim")
+	}
+	if got.Complete {
+		t.Error("Complete = true, want false: the stream broke before the end")
+	}
+}
+
+func TestSubmitHandler_NoScannerMakesNoClaim(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	submissionLog := &fakeLog{}
+
+	handler := &SubmitHandler{
+		Sessions: sessions,
+		Store:    newFakeStore(),
+		Log:      submissionLog,
+		// AVScanner deliberately nil — cmd/portal-dev runs this way.
+	}
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, buildValidArchive(t, operatorAddr.String())); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	if submissionLog.entries[0].Scan != nil {
+		t.Errorf("Scan = %+v, want nil: nothing examined this submission, so nothing may vouch for it",
+			*submissionLog.entries[0].Scan)
+	}
+}
+
+func TestSubmitHandler_BudgetExhaustedIsRecordedNotRejected(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	submissionLog := &fakeLog{}
+
+	handler := &SubmitHandler{
+		Sessions:     sessions,
+		Store:        newFakeStore(),
+		Log:          submissionLog,
+		AVScanner:    &capturingScanner{},
+		AVScanBudget: 5, // far below the log's decompressed length
+	}
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, buildValidArchive(t, operatorAddr.String())); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: exceeding the budget is recorded, not rejected", status)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil || got.Complete || got.Bytes != 5 {
+		t.Errorf("Scan = %+v, want {Complete:false Bytes:5}", got)
+	}
+}
+
+func TestSubmitHandler_RejectsInfectedLog(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+
+	// Clean on metadata.json, infected on the log: proves the log windows
+	// are verdicted too, not just the first scan.
+	scanner := &capturingScanner{
+		verdicts: []clamav.Verdict{{}, {Infected: true, Signature: "Test.Sig"}},
+	}
+	handler := &SubmitHandler{Sessions: sessions, Store: store, AVScanner: scanner}
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, buildValidArchive(t, operatorAddr.String())); status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("an infected archive was stored")
+	}
+}
+
+func TestSubmitHandler_ScannerFailureOnTheLogIs503(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+
+	scanner := &capturingScanner{errs: []error{nil, errors.New("connection refused")}}
+	handler := &SubmitHandler{Sessions: sessions, Store: store, AVScanner: scanner}
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, buildValidArchive(t, operatorAddr.String())); status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: a scan that could not be completed fails closed", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("an unscanned archive was stored")
 	}
 }
