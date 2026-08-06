@@ -2,8 +2,9 @@ package scoring
 
 // Result is one submission's Phase 3 scoring record, keyed by the
 // owning portal.Entry's ID. The automatic fields are computed once, at
-// submit time (see AutoChecks and portal.SubmitHandler); the manual
-// field is filled in later by an admin, via
+// submit time (see MetadataChecks, ScanLogWindow, and
+// portal.SubmitHandler); the manual field is filled in later by an
+// admin, via
 // POST /admin/submissions/{id}/score, since prd.md's rubric includes
 // one criterion — incident response quality — that this codebase has
 // no way to observe automatically.
@@ -17,9 +18,20 @@ type Result struct {
 	GenesisMatch     bool           `json:"genesis_match"`
 	VersionSupported bool           `json:"version_supported"`
 	LogWindow        LogWindowCheck `json:"log_window"`
-	UploadTimeScore  int            `json:"upload_time_score"`
-	MetadataScore    int            `json:"metadata_score"`
-	LogQualityScore  int            `json:"log_quality_score"`
+
+	// SentryLogPresent and SentryLogWindow describe the optional
+	// sentry.log.gz. They are separate because the window alone cannot
+	// tell "no sentry log was submitted" from "one was, and nothing in it
+	// parsed" — both score zero, but only the first is worth telling a
+	// human about. New fields decode as zero values on records written
+	// before this existed, which reads as "no sentry log": what those
+	// submissions in fact had.
+	SentryLogPresent bool           `json:"sentry_log_present,omitempty"`
+	SentryLogWindow  LogWindowCheck `json:"sentry_log_window,omitempty"`
+
+	UploadTimeScore int `json:"upload_time_score"`
+	MetadataScore   int `json:"metadata_score"`
+	LogQualityScore int `json:"log_quality_score"`
 
 	IncidentResponseQualityScore *int `json:"incident_response_quality_score,omitempty"`
 }

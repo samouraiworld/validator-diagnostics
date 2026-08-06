@@ -87,15 +87,31 @@ type LogWindowCheck struct {
 // LogQualityScore combines the fixed base credit for passing archive
 // structure validation — already enforced before a submission is ever
 // scored, see submission.ValidateArchive — with credit for how well
-// the detected log timestamps cover the investigation window.
-func LogQualityScore(window LogWindowCheck) int {
+// each submitted log's timestamps cover the investigation window.
+//
+// The sentry log is worth 4 of the 25, taken out of the validator log's
+// share rather than added on top: the rubric totals 100 and this
+// criterion caps at 25. A submission with no sentry log therefore caps
+// at 21. That is the intended incentive — running a sentry is the
+// behaviour this is meant to reward, and a criterion every submission
+// maxes out measures nothing.
+func LogQualityScore(validator, sentry LogWindowCheck) int {
 	const structuralBase = 13
+	return structuralBase + windowCredit(validator, 8, 4) + windowCredit(sentry, 4, 2)
+}
+
+// windowCredit grades one log's window check: full credit for verified
+// coverage, partial for timestamps that were found but do not (or could
+// not be shown to) span the window, none for a log that yielded no
+// recognizable timestamp — which is also what an absent optional log
+// yields, since its zero LogWindowCheck is not Detected.
+func windowCredit(w LogWindowCheck, covered, detected int) int {
 	switch {
-	case window.Covered:
-		return structuralBase + 12
-	case window.Detected:
-		return structuralBase + 6
+	case w.Covered:
+		return covered
+	case w.Detected:
+		return detected
 	default:
-		return structuralBase
+		return 0
 	}
 }

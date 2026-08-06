@@ -306,7 +306,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// structurally satisfied — see scoring.LogQualityScore's
 					// doc comment for the analogous reasoning on log quality.
 					result.MetadataScore = 25
-					result.LogQualityScore = scoring.LogQualityScore(window)
+					result.LogQualityScore = scoring.LogQualityScore(window, scoring.LogWindowCheck{})
 				}
 			}
 			if h.Scores != nil {
@@ -367,7 +367,8 @@ func autoChecks(ctx context.Context, file io.ReadSeeker, opts submission.Options
 	}
 	defer logGz.Close()
 
-	genesisMatch, versionSupported, window = scoring.AutoChecks(meta, logGz, cfg)
+	genesisMatch, versionSupported = scoring.MetadataChecks(meta, cfg)
+	window = scoring.ScanLogWindow(logGz, cfg)
 	return genesisMatch, versionSupported, window, nil
 }
 
