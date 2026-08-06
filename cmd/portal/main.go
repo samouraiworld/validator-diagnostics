@@ -107,6 +107,7 @@ func main() {
 	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; must comfortably cover streaming a whole -max-upload-size archive to clamd")
 	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; keep this <= clamd's StreamMaxLength (see clamd.conf) or scannable uploads will be rejected with 503")
 	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of the gnoland.log.gz entry inside the archive; the entry is streamed rather than buffered, so this bounds decompression work rather than memory")
+	avScanBudget := flag.Int64("av-scan-budget", clamav.DefaultScanBudget, "maximum decompressed bytes of gnoland.log.gz submitted to the antivirus; a submission that exceeds it is accepted and recorded as partially scanned, not rejected")
 	flag.Parse()
 
 	if *remote == "" {
@@ -141,7 +142,14 @@ func main() {
 	exerciseStore := exercise.NewFileStore(*exercisePath)
 	scoresStore := scoring.NewStore(*scoresPath)
 
-	var avScanner clamav.Scanner = clamav.NoopScanner{}
+	// Deliberately left nil when -clamav-addr is unset, rather than filled
+	// with clamav.NoopScanner: a no-op scanner returns a clean verdict over
+	// every window, which would have the portal record complete coverage
+	// and the dashboard show a reassuring "scan ✓" on a submission no
+	// antivirus ever looked at. Nil records no coverage claim at all, which
+	// is the only honest answer. NoopScanner remains in the clamav package
+	// for tests, where claiming coverage is exactly what is wanted.
+	var avScanner clamav.Scanner
 	if *clamavAddr != "" {
 		avScanner = clamav.ClamdScanner{Addr: *clamavAddr, Timeout: *clamavTimeout}
 	} else {
@@ -164,6 +172,7 @@ func main() {
 		ExerciseStore:  exerciseStore,
 		ScoresStore:    scoresStore,
 		AVScanner:      avScanner,
+		AVScanBudget:   *avScanBudget,
 		MaxUploadSize:  *maxUploadSize,
 		ArchiveOptions: submission.Options{MaxLogSize: *maxLogSize},
 		StaticFS:       staticFS,
@@ -188,6 +197,7 @@ type muxDeps struct {
 	ExerciseStore  *exercise.FileStore
 	ScoresStore    *scoring.Store
 	AVScanner      clamav.Scanner
+	AVScanBudget   int64
 	MaxUploadSize  int64
 	ArchiveOptions submission.Options
 	StaticFS       fs.FS
@@ -211,17 +221,7 @@ func newMux(d muxDeps) *http.ServeMux {
 	mux.Handle("/auth/challenge", auth.ChallengeHandler(d.Nonces))
 	mux.Handle("/auth/verify", auth.VerifyHandler(d.Verifier, d.Sessions))
 	mux.Handle("/auth/admin/verify", auth.VerifyHandler(d.Verifier, d.AdminSessions))
-	mux.Handle("/submit", &portal.SubmitHandler{
-		Sessions:      d.Sessions,
-		Store:         d.Store,
-		Log:           d.SubmissionLog,
-		AVScanner:     d.AVScanner,
-		Exercise:      d.ExerciseStore,
-		Scores:        d.ScoresStore,
-		MaxUploadSize: d.MaxUploadSize,
-
-		ArchiveOptions: d.ArchiveOptions,
-	})
+	mux.Handle("/submit", submitHandlerFor(d))
 	mux.Handle("/admin", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, d.StaticFS, "admin.html")
 	}))
@@ -232,6 +232,24 @@ func newMux(d muxDeps) *http.ServeMux {
 	mux.Handle("/admin/summary", portal.RequireAdminSession(d.AdminSessions, d.AdminAllowlist, portal.AdminSummaryHandler(d.SubmissionLog, d.ExerciseStore, d.ScoresStore)))
 	mux.Handle("/", http.FileServer(http.FS(d.StaticFS)))
 	return mux
+}
+
+// submitHandlerFor builds the upload handler newMux serves at /submit.
+// Extracted so the wiring can be asserted directly, without unpicking the
+// routing table to reach the handler.
+func submitHandlerFor(d muxDeps) *portal.SubmitHandler {
+	return &portal.SubmitHandler{
+		Sessions:      d.Sessions,
+		Store:         d.Store,
+		Log:           d.SubmissionLog,
+		AVScanner:     d.AVScanner,
+		AVScanBudget:  d.AVScanBudget,
+		Exercise:      d.ExerciseStore,
+		Scores:        d.ScoresStore,
+		MaxUploadSize: d.MaxUploadSize,
+
+		ArchiveOptions: d.ArchiveOptions,
+	}
 }
 
 func configureStore(uploadDir, s3Bucket, s3Region, s3Endpoint string) (storage.Store, error) {

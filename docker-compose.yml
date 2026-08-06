@@ -83,6 +83,10 @@ services:
       # submission.OpenLog. The ceiling here is decompression work, not
       # resident memory.
       - -max-log-size=${MAX_LOG_SIZE:-268435456}
+      # Decompressed bytes of gnoland.log.gz the antivirus may examine.
+      # Past this the submission is accepted and recorded as partially
+      # scanned — the cap is bomb defence, not cost control.
+      - -av-scan-budget=${AV_SCAN_BUDGET:-34359738368}
     volumes:
       - portal-logs:/data
     ports:

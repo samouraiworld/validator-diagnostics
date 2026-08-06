@@ -255,3 +255,24 @@ func TestParseAdminAllowlist(t *testing.T) {
 		}
 	})
 }
+
+func TestSubmitHandlerFor_PassesTheAVScanBudget(t *testing.T) {
+	h := submitHandlerFor(muxDeps{
+		AVScanner:    clamav.NoopScanner{},
+		AVScanBudget: 4096,
+	})
+	if h.AVScanBudget != 4096 {
+		t.Errorf("AVScanBudget = %d, want 4096", h.AVScanBudget)
+	}
+	if h.AVScanner == nil {
+		t.Error("AVScanner = nil, want the wired scanner")
+	}
+}
+
+func TestSubmitHandlerFor_NilScannerStaysNil(t *testing.T) {
+	// The guard for the whole point of dropping the NoopScanner fallback:
+	// nothing between the flag and the handler may substitute a scanner.
+	if h := submitHandlerFor(muxDeps{}); h.AVScanner != nil {
+		t.Errorf("AVScanner = %#v, want nil when none was wired", h.AVScanner)
+	}
+}
