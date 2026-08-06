@@ -160,26 +160,31 @@ func main() {
 
 	avScanner := configureAVScanner(*clamavAddr, *clamavTimeout)
 
+	// One tracker for the process: it holds at most one entry per operator
+	// with a submission in flight.
+	progressTracker := portal.NewProgressTracker()
+
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		log.Fatalf("unable to load embedded static assets: %v", err)
 	}
 
 	mux := newMux(muxDeps{
-		Verifier:       verifier,
-		Nonces:         nonces,
-		Sessions:       sessions,
-		AdminSessions:  adminSessions,
-		AdminAllowlist: adminAllowlist,
-		Store:          store,
-		SubmissionLog:  submissionLog,
-		ExerciseStore:  exerciseStore,
-		ScoresStore:    scoresStore,
-		AVScanner:      avScanner,
-		AVScanBudget:   *avScanBudget,
-		MaxUploadSize:  *maxUploadSize,
-		ArchiveOptions: submission.Options{MaxLogSize: *maxLogSize},
-		StaticFS:       staticFS,
+		Verifier:        verifier,
+		Nonces:          nonces,
+		Sessions:        sessions,
+		AdminSessions:   adminSessions,
+		AdminAllowlist:  adminAllowlist,
+		Store:           store,
+		SubmissionLog:   submissionLog,
+		ExerciseStore:   exerciseStore,
+		ScoresStore:     scoresStore,
+		AVScanner:       avScanner,
+		AVScanBudget:    *avScanBudget,
+		MaxUploadSize:   *maxUploadSize,
+		ArchiveOptions:  submission.Options{MaxLogSize: *maxLogSize},
+		ProgressTracker: progressTracker,
+		StaticFS:        staticFS,
 	})
 
 	log.Printf("listening on %s, verifying operator pubkeys against %s", *addr, *remote)
@@ -191,20 +196,21 @@ func main() {
 // individual middleware in isolation — can be exercised by a real HTTP
 // round trip in tests.
 type muxDeps struct {
-	Verifier       *auth.Verifier
-	Nonces         *auth.NonceStore
-	Sessions       *auth.SessionSigner
-	AdminSessions  *auth.SessionSigner
-	AdminAllowlist map[string]bool
-	Store          storage.Store
-	SubmissionLog  *portal.FileLog
-	ExerciseStore  *exercise.FileStore
-	ScoresStore    *scoring.Store
-	AVScanner      clamav.Scanner
-	AVScanBudget   int64
-	MaxUploadSize  int64
-	ArchiveOptions submission.Options
-	StaticFS       fs.FS
+	Verifier        *auth.Verifier
+	Nonces          *auth.NonceStore
+	Sessions        *auth.SessionSigner
+	AdminSessions   *auth.SessionSigner
+	AdminAllowlist  map[string]bool
+	Store           storage.Store
+	SubmissionLog   *portal.FileLog
+	ExerciseStore   *exercise.FileStore
+	ScoresStore     *scoring.Store
+	AVScanner       clamav.Scanner
+	AVScanBudget    int64
+	MaxUploadSize   int64
+	ArchiveOptions  submission.Options
+	ProgressTracker *portal.ProgressTracker
+	StaticFS        fs.FS
 }
 
 // newMux builds the portal's routing table.
@@ -226,6 +232,7 @@ func newMux(d muxDeps) *http.ServeMux {
 	mux.Handle("/auth/verify", auth.VerifyHandler(d.Verifier, d.Sessions))
 	mux.Handle("/auth/admin/verify", auth.VerifyHandler(d.Verifier, d.AdminSessions))
 	mux.Handle("/submit", submitHandlerFor(d))
+	mux.Handle("/submit/progress", portal.ProgressHandler(d.Sessions, d.ProgressTracker))
 	mux.Handle("/admin", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, d.StaticFS, "admin.html")
 	}))
@@ -251,6 +258,7 @@ func submitHandlerFor(d muxDeps) *portal.SubmitHandler {
 		Exercise:      d.ExerciseStore,
 		Scores:        d.ScoresStore,
 		MaxUploadSize: d.MaxUploadSize,
+		Progress:      d.ProgressTracker,
 
 		ArchiveOptions: d.ArchiveOptions,
 	}

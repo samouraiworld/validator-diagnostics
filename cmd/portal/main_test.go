@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -303,5 +304,51 @@ func TestConfigureAVScanner_NonEmptyAddrReturnsClamdScanner(t *testing.T) {
 	}
 	if got.Timeout != 5*time.Minute {
 		t.Errorf("Timeout = %v, want %v", got.Timeout, 5*time.Minute)
+	}
+}
+
+func TestSubmitHandlerFor_PassesTheProgressTracker(t *testing.T) {
+	tracker := portal.NewProgressTracker()
+	if h := submitHandlerFor(muxDeps{ProgressTracker: tracker}); h.Progress != tracker {
+		t.Error("Progress did not reach the handler")
+	}
+}
+
+func TestNewMux_RoutesSubmitProgress(t *testing.T) {
+	// /submit is registered as an exact pattern, so /submit/progress does not
+	// collide with it — but adding a trailing slash to either registration
+	// would silently change which handler wins, so assert the routing.
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	tracker := portal.NewProgressTracker()
+
+	mux := newMux(muxDeps{
+		Sessions:        sessions,
+		AdminSessions:   auth.NewSessionSigner([]byte("admin-secret"), 5*time.Minute),
+		Store:           storage.LocalStore{Dir: t.TempDir()},
+		SubmissionLog:   portal.NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl")),
+		ExerciseStore:   exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json")),
+		ScoresStore:     scoring.NewStore(filepath.Join(t.TempDir(), "scores.json")),
+		ProgressTracker: tracker,
+		StaticFS:        os.DirFS(t.TempDir()),
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var addr crypto.Address
+	copy(addr[:], []byte("01234567890123456789")) // 20 bytes
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/submit/progress", nil)
+	req.Header.Set("Authorization", "Bearer "+sessions.Issue(addr))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /submit/progress: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 404 from the progress handler, not 405 from /submit's POST-only guard:
+	// the session is valid and nothing is in flight.
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 from the progress handler", resp.StatusCode)
 	}
 }
