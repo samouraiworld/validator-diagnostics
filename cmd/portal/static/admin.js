@@ -169,9 +169,24 @@ function formatBytes(n) {
   // decimal ones (MB/GB) — matches the README, .env.example, and the
   // upload page's own help text, which all quote limits in MiB/GiB.
   //
+  // Below 1 MiB this used to floor to "0.0 MiB" for any value, which reads
+  // as a rendering bug on a scan that broke after only a few KB (a real,
+  // small coverage number) — so bytes and KiB get their own bands instead
+  // of being rounded away. 1 MiB and up is unchanged from before: the
+  // README, .env.example, and the upload page all quote limits in
+  // MiB/GiB, so that boundary has to stay put.
+  //
   // Duplicated from portal.js rather than shared: the two files serve
-  // different pages and this project has no module bundler.
-  const mib = n / (1024 * 1024);
+  // different pages and this project has no module bundler. Keep both
+  // copies identical.
+  if (n < 1024) {
+    return n + " B";
+  }
+  const kib = n / 1024;
+  if (kib < 1024) {
+    return kib.toFixed(1) + " KiB";
+  }
+  const mib = kib / 1024;
   if (mib >= 1024) {
     return (mib / 1024).toFixed(1) + " GiB";
   }

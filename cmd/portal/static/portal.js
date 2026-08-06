@@ -40,7 +40,19 @@ function formatBytes(n) {
   // Divides by 1024, so the labels are the binary units (MiB/GiB), not
   // the decimal ones (MB/GB) — matches the README, .env.example, and this
   // page's own help text, which all quote limits in MiB/GiB.
-  const mib = n / (1024 * 1024);
+  //
+  // Below 1 MiB this used to floor to "0.0 MiB" for any value; bytes and
+  // KiB get their own bands instead of being rounded away. 1 MiB and up
+  // is unchanged from before. Duplicated in admin.js — keep both copies
+  // identical.
+  if (n < 1024) {
+    return n + " B";
+  }
+  const kib = n / 1024;
+  if (kib < 1024) {
+    return kib.toFixed(1) + " KiB";
+  }
+  const mib = kib / 1024;
   if (mib >= 1024) {
     return (mib / 1024).toFixed(1) + " GiB";
   }
