@@ -326,6 +326,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			OperatorAddress: operatorAddr.String(),
 			Filename:        header.Filename,
 			SubmittedAt:     recordedAt,
+			SentryEnabled:   metadata.SentryEnabled,
 			Scan:            scanCoverage,
 		}
 		if err := h.Log.Record(r.Context(), entry); err != nil {
