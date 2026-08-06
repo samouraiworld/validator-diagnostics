@@ -52,15 +52,24 @@ type Progress struct {
 // to plumb through the browser and the handler.
 //
 // The cost of that choice is one degraded case: an operator running two
-// submissions at once gets a display driven by whichever wrote last, and the
-// first handle's Done removes the second's entry. Both submissions still
-// complete and record correctly — only the display is affected.
+// submissions at once gets a display driven by the newer one. Begin stamps
+// each entry with a generation token, so a second Begin supersedes the
+// first — the first handle's Phase and Add calls become inert rather than
+// corrupting the second submission's counters, and its Done cannot remove
+// the second's entry. Both submissions still complete and record correctly;
+// only the superseded handle's writes are discarded.
 //
 // The zero value is not usable; call NewProgressTracker. A nil
 // *ProgressTracker, however, is: it behaves as "reporting disabled".
 type ProgressTracker struct {
 	mu       sync.Mutex
 	inflight map[string]*progressEntry
+
+	// nextGen hands out each new entry's generation token. Monotonically
+	// increasing under mu, so the most recent Begin for an operator always
+	// holds the highest token and every older handle for that operator can
+	// tell it has been superseded.
+	nextGen uint64
 
 	// now is swappable so the staleness tests don't have to sleep.
 	now func() time.Time
@@ -69,6 +78,12 @@ type ProgressTracker struct {
 type progressEntry struct {
 	progress   Progress
 	lastUpdate time.Time
+
+	// gen is this entry's generation token, assigned by Begin. A handle
+	// only matches the entry that has the same token: once a second Begin
+	// replaces the entry, the first handle's token is stale and every
+	// method on it becomes a no-op instead of reaching into the new entry.
+	gen uint64
 }
 
 func NewProgressTracker() *ProgressTracker {
@@ -80,14 +95,19 @@ func NewProgressTracker() *ProgressTracker {
 
 // ProgressHandle publishes into the entry Begin created. Every method
 // tolerates a nil receiver, so a handler built without a tracker needs no
-// guard at any call site.
+// guard at any call site. A handle also goes inert once a later Begin for
+// the same operator supersedes its entry — see ProgressTracker's doc
+// comment.
 type ProgressHandle struct {
 	tracker  *ProgressTracker
 	operator string
+	gen      uint64
 }
 
 // Begin starts tracking a submission for operator, replacing any entry that
-// operator already had. Callers must defer the returned handle's Done.
+// operator already had and superseding whatever handle owned it — that
+// handle's Phase, Add, and Done become no-ops. Callers must defer the
+// returned handle's Done.
 func (t *ProgressTracker) Begin(operator string) *ProgressHandle {
 	if t == nil {
 		return nil
@@ -97,11 +117,14 @@ func (t *ProgressTracker) Begin(operator string) *ProgressHandle {
 	defer t.mu.Unlock()
 
 	now := t.now()
+	t.nextGen++
+	gen := t.nextGen
 	t.inflight[operator] = &progressEntry{
 		progress:   Progress{PhaseStartedAt: now},
 		lastUpdate: now,
+		gen:        gen,
 	}
-	return &ProgressHandle{tracker: t, operator: operator}
+	return &ProgressHandle{tracker: t, operator: operator, gen: gen}
 }
 
 // Get returns operator's current progress. ok is false when nothing is in
@@ -144,7 +167,10 @@ func (h *ProgressHandle) Add(n int64) {
 	})
 }
 
-// Done removes the entry. Safe to call twice, and safe on a nil handle.
+// Done removes the entry, unless a later Begin for the same operator has
+// already superseded it — in which case that entry belongs to a different
+// submission and Done leaves it alone. Safe to call twice, and safe on a
+// nil handle.
 func (h *ProgressHandle) Done() {
 	if h == nil {
 		return
@@ -152,13 +178,17 @@ func (h *ProgressHandle) Done() {
 
 	h.tracker.mu.Lock()
 	defer h.tracker.mu.Unlock()
-	delete(h.tracker.inflight, h.operator)
+
+	if e, ok := h.tracker.inflight[h.operator]; ok && e.gen == h.gen {
+		delete(h.tracker.inflight, h.operator)
+	}
 }
 
 // update applies f to this handle's entry under the tracker's lock, and
-// refreshes the staleness clock. It is a no-op on a nil handle, and on an
-// entry that no longer exists — which is what a handle outliving its own
-// Done looks like.
+// refreshes the staleness clock. It is a no-op on a nil handle, on an entry
+// that no longer exists — which is what a handle outliving its own Done
+// looks like — and on an entry whose generation has moved past this
+// handle's, which is what a handle outlived by a later Begin looks like.
 func (h *ProgressHandle) update(f func(e *progressEntry, now time.Time)) {
 	if h == nil {
 		return
@@ -168,7 +198,7 @@ func (h *ProgressHandle) update(f func(e *progressEntry, now time.Time)) {
 	defer h.tracker.mu.Unlock()
 
 	e, ok := h.tracker.inflight[h.operator]
-	if !ok {
+	if !ok || e.gen != h.gen {
 		return
 	}
 	now := h.tracker.now()

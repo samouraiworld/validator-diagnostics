@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -89,6 +90,91 @@ func TestProgressTracker_SecondBeginReplacesTheFirst(t *testing.T) {
 	}
 	if got.Bytes != 0 || got.Phase != "" {
 		t.Errorf("got %+v, want a fresh entry: the second submission must not inherit the first's counters", got)
+	}
+}
+
+func TestProgressTracker_SupersededHandleWritesAreInert(t *testing.T) {
+	// A superseded handle's Phase and Add must not reach into the entry a
+	// later Begin created — that entry belongs to a different submission.
+	tracker := NewProgressTracker()
+
+	first := tracker.Begin("g1alice")
+	second := tracker.Begin("g1alice")
+	second.Phase(PhaseScanning, 0)
+	second.Add(10)
+
+	first.Phase(PhaseStoring, 999)
+	first.Add(500)
+
+	got, ok := tracker.Get("g1alice")
+	if !ok {
+		t.Fatal("Get reported nothing after the second Begin")
+	}
+	if got.Phase != PhaseScanning || got.Bytes != 10 || got.Total != 0 {
+		t.Errorf("got %+v, want the second submission's progress untouched by the first's stale writes", got)
+	}
+}
+
+func TestProgressTracker_SupersededHandleDoneDoesNotRemoveTheNewEntry(t *testing.T) {
+	tracker := NewProgressTracker()
+
+	first := tracker.Begin("g1alice")
+	second := tracker.Begin("g1alice")
+
+	first.Done()
+	if _, ok := tracker.Get("g1alice"); !ok {
+		t.Error("the superseded handle's Done removed the newer submission's entry")
+	}
+
+	second.Done()
+	if _, ok := tracker.Get("g1alice"); ok {
+		t.Error("the current handle's Done did not remove its own entry")
+	}
+}
+
+func TestProgressTracker_AddIsRaceSafeUnderConcurrentGet(t *testing.T) {
+	// The mutex correctness otherwise rests on code reading alone; this is
+	// the test that makes `-race` meaningful for this type.
+	tracker := NewProgressTracker()
+	h := tracker.Begin("g1alice")
+
+	const goroutines = 20
+	const perGoroutine = 100
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				h.Add(1)
+			}
+		}()
+	}
+
+	// Concurrent readers exercise the mutex from the other side while the
+	// writers above are still running.
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				tracker.Get("g1alice")
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(done)
+
+	got, ok := tracker.Get("g1alice")
+	if !ok {
+		t.Fatal("Get reported nothing after concurrent Add calls")
+	}
+	if want := int64(goroutines * perGoroutine); got.Bytes != want {
+		t.Errorf("got Bytes = %d, want %d", got.Bytes, want)
 	}
 }
 
