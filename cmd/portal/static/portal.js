@@ -314,6 +314,10 @@ document.getElementById("submit-archive").addEventListener("click", () => {
   button.disabled = true;
   progress.hidden = false;
   setUploadProgress(0, file.size);
+  // Cleared explicitly: renderServerProgress only touches this element once
+  // the first poll lands, so without this a second submission would show
+  // the previous run's byte line until then.
+  document.getElementById("upload-detail").textContent = "";
   announcePhase("Upload started.");
 
   // fetch() reports no progress for the request body, so this one call
