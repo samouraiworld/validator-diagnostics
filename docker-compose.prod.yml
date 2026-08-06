@@ -1,0 +1,226 @@
+# Production stack. Differs from docker-compose.yml in four ways:
+#
+#   1. portal runs a published image from GHCR instead of building from
+#      this checkout, so the host needs neither the Go toolchain nor the
+#      source.
+#   2. Every service restarts unless explicitly stopped.
+#   3. A commented Traefik block provides TLS termination.
+#   4. Upstream image tags carry a note about pinning (see below).
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# The .env file is read the same way as in development; see .env.example
+# for the variables, including the three that only matter here
+# (PORTAL_IMAGE_TAG, PORTAL_DOMAIN, ACME_EMAIL).
+
+services:
+  clamav:
+    # Consider pinning to a digest or dated tag for production: `stable`
+    # moves, so a restart can quietly change the ClamAV version under a
+    # running deployment. Left floating here because the right pin
+    # depends on what you have actually tested against.
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    volumes:
+      - clamav-data:/var/lib/clamav
+      # Raises clamd's stock stream limit to comfortably cover one scan
+      # window (metadata.json, or a 1 GiB gnoland.log.gz window plus its
+      # 1 MiB overlap), and makes it report content it skipped for
+      # exceeding a limit instead of answering OK — see the file's own
+      # header. Note this replaces the image's config wholesale, so
+      # anything the stock file set is gone unless clamd.conf sets it too.
+      #
+      # This is the one file the production host needs from the repo
+      # besides the compose file itself and .env.
+      - ./clamd.conf:/etc/clamav/clamd.conf:ro
+      # clamd spools each INSTREAM body here (TemporaryDirectory in
+      # clamd.conf). On the container's writable layer, concurrent ~1 GiB
+      # scan windows across concurrent uploads would eat the host's Docker
+      # storage instead.
+      - clamav-tmp:/var/tmp/clamav
+    # clamd holds the whole signature database resident (~1-2 GB). Without
+    # a ceiling a spike takes the host down with it; with one, the
+    # container is the only casualty and the portal 503s until it is back.
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      # Budget generously: the portal has `condition: service_healthy`, so
+      # exhausting these retries doesn't just delay startup, it fails the
+      # portal container outright. A first-boot CVD download on a slow
+      # link is the case that overruns.
+      retries: 20
+      start_period: 300s # first boot downloads the virus database
+
+  minio:
+    # Same pinning caveat as clamav above — `latest` in particular will
+    # follow MinIO across releases, including breaking ones.
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --address ":9001" --console-address ":9002"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    # A one-shot job: it creates the bucket and exits. Restarting it
+    # would loop forever, so it is the one service left at the default
+    # restart policy.
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-submissions}
+    entrypoint: >
+      sh -c "
+      until mc alias set local http://minio:9001 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\"; do sleep 1; done &&
+      mc mb --ignore-existing local/$$S3_BUCKET
+      "
+
+  portal:
+    # Published by .github/workflows/ci.yml on every merge to master.
+    # PORTAL_IMAGE_TAG exists for rollback: set it to a sha- tag from a
+    # known-good commit (docker image ls, or the repo's Packages page)
+    # and redeploy, without editing this file.
+    image: ghcr.io/samouraiworld/validator-diagnostics:${PORTAL_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+    environment:
+      ADMIN_OPERATOR_ADDRESSES: ${ADMIN_OPERATOR_ADDRESSES}
+      # Unlike in development, set both of these explicitly in .env. Left
+      # unset the portal generates a random secret per run, so every
+      # restart — including one triggered by `restart: unless-stopped` —
+      # signs every validator and admin out mid-exercise.
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    command:
+      - -remote=${REMOTE}
+      - -addr=0.0.0.0:8888
+      - -s3-bucket=${S3_BUCKET:-submissions}
+      - -s3-region=us-east-1
+      - -s3-endpoint=http://minio:9001
+      - -log-path=/data/submissions.jsonl
+      - -exercise-path=/data/exercise.json
+      - -scores-path=/data/scores.json
+      - -clamav-addr=clamav:3310
+      - -clamav-timeout=15m
+      # The upload authenticates once, when the request starts, but the page
+      # re-authenticates on every progress poll — so a TTL shorter than a
+      # submission takes leaves the submission running while its progress
+      # display goes dark. A 4 GiB archive transfers, validates, scans and
+      # stores well past the 5-minute default, so this covers the worst case
+      # the upload ceiling allows rather than the typical one.
+      - -session-ttl=${SESSION_TTL:-2h}
+      # 4 GiB. clamd never sees more than a 1 GiB scan window of this at a
+      # time, so raising it further is a disk/S3/time question, not a
+      # clamd.conf one — see README.md's "Upload size and ClamAV".
+      # Source of truth: cmd/portal/main.go's defaultMaxUploadSize
+      # constant; this file can't import a Go constant, so keep the two
+      # numbers in step by hand.
+      - -max-upload-size=${MAX_UPLOAD_SIZE:-4294967296}
+      # 4 GiB, matching MAX_UPLOAD_SIZE. Streamed, not buffered — see
+      # submission.ValidateArchive and submission.OpenLog. The ceiling
+      # here is decompression work, not resident memory.
+      # Source of truth: cmd/portal/main.go's defaultMaxLogSize constant;
+      # this file can't import a Go constant, so keep the two numbers in
+      # step by hand.
+      - -max-log-size=${MAX_LOG_SIZE:-4294967296}
+      # Decompressed bytes of gnoland.log.gz the antivirus may examine.
+      # Past this the submission is accepted and recorded as partially
+      # scanned — the cap is bomb defence, not cost control.
+      # Source of truth: clamav.DefaultScanBudget; this file can't import
+      # a Go constant, so keep the two numbers in step by hand.
+      - -av-scan-budget=${AV_SCAN_BUDGET:-34359738368}
+    volumes:
+      - portal-logs:/data
+    # Direct publication on the host port, which is what you want with no
+    # reverse proxy in front. REMOVE THIS when you enable the Traefik
+    # block below — otherwise the portal stays reachable in plaintext on
+    # this port, alongside the TLS route, and validators' signed sessions
+    # can be read off the wire.
+    ports:
+      - "${PORTAL_PORT:-8080}:8888"
+    # --- Traefik routing labels (see the traefik service below) ---
+    # labels:
+    #   - traefik.enable=true
+    #   - traefik.http.routers.portal.rule=Host(`${PORTAL_DOMAIN}`)
+    #   - traefik.http.routers.portal.entrypoints=websecure
+    #   - traefik.http.routers.portal.tls.certresolver=letsencrypt
+    #   # The container port, not the published one. Needed because the
+    #   # image EXPOSEs 8888 and nothing else would tell Traefik which
+    #   # port to dial once the `ports:` mapping above is gone.
+    #   - traefik.http.services.portal.loadbalancer.server.port=8888
+
+  # --- Optional TLS termination ------------------------------------
+  # To enable: uncomment this service, the portal labels above, and the
+  # traefik-acme volume at the bottom; remove the portal's `ports:`
+  # block; set PORTAL_DOMAIN and ACME_EMAIL in .env; point the domain's
+  # A record at this host and make sure ports 80 and 443 are reachable
+  # (the HTTP-01 challenge needs port 80 even though traffic is
+  # redirected off it).
+  #
+  # If you already run Traefik elsewhere on this host, don't uncomment
+  # this service — attach the portal to that Traefik's external network
+  # instead and keep only the labels above.
+  #
+  # traefik:
+  #   image: traefik:v3
+  #   restart: unless-stopped
+  #   command:
+  #     - --providers.docker=true
+  #     # Nothing is routed unless it opts in with traefik.enable=true,
+  #     # so minio and clamav stay off the internet.
+  #     - --providers.docker.exposedbydefault=false
+  #     - --entrypoints.web.address=:80
+  #     - --entrypoints.web.http.redirections.entrypoint.to=websecure
+  #     - --entrypoints.web.http.redirections.entrypoint.scheme=https
+  #     - --entrypoints.websecure.address=:443
+  #     # Two timeouts matter for this application specifically. A
+  #     # submission is one long request: up to 4 GiB uploaded, then
+  #     # validated, then scanned by clamd (-clamav-timeout=15m above)
+  #     # before the response is written. Any finite proxy timeout cuts
+  #     # the client off while the portal is still working, and the
+  #     # validator sees a failure for a submission that actually
+  #     # succeeded. 0 disables them.
+  #     - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=0
+  #     - --entrypoints.websecure.transport.respondingTimeouts.writeTimeout=0
+  #     - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+  #     - --certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json
+  #     - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+  #     - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     # Read-only: Traefik only needs to watch container events. It is
+  #     # still the Docker socket, so it is effectively root on this host
+  #     # — that is the trade-off the docker provider asks for.
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     # Certificates survive a recreate. Without this you re-issue on
+  #     # every deploy and will hit Let's Encrypt's rate limits.
+  #     - traefik-acme:/acme
+  #
+  # Deliberately NOT configured: any buffering middleware. Traefik
+  # streams request bodies by default, and it must keep doing so here —
+  # buffering would write a 4 GiB submission to the proxy's disk in full
+  # before the portal saw a single byte, while the portal itself streams
+  # straight through to clamd and S3.
+
+volumes:
+  minio-data:
+  portal-logs:
+  clamav-data:
+  clamav-tmp:
+  # traefik-acme:

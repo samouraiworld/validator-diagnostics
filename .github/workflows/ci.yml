@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# A pull request pushed several times in a row shouldn't queue a run per
+# push. master is excluded: every commit there publishes an image, so
+# cancelling one would leave a gap in the sha- tags.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # go-version-file rather than a literal: the Go version is already
+      # pinned in go.mod (and tracked by the Dockerfile's golang tag).
+      # Spelling it out here would add a third copy to keep in step.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go vet ./...
+
+      # The suite builds its archives in memory, so nothing here depends
+      # on test/ — which is 2.7 GB of fixtures and deliberately not
+      # tracked in git.
+      - run: go test ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Gates publication on the tests: a red suite must not be able to
+    # reach GHCR. Splitting this into a separate release workflow would
+    # lose that ordering unless it were reintroduced by hand.
+    needs: test
+    permissions:
+      contents: read
+      # Scoped to this job — the test job stays read-only.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Only master pushes, so pull requests (including ones from forks,
+      # which have no write access to the registry anyway) never need
+      # registry credentials.
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags produced, in the order listed below:
+      #   latest        — master only; what docker-compose.prod.yml pulls
+      #                   by default.
+      #   sha-abc1234   — every commit; the rollback target. The prod
+      #                   compose reads PORTAL_IMAGE_TAG, so pinning one
+      #                   of these reverts a deployment without editing
+      #                   the compose file.
+      #   <branch>      — a branch build, for trying a change before merge.
+      #   pr-<n>        — pull request builds (computed, never pushed).
+      # The list has to be one multi-line string: action inputs are
+      # strings, and metadata-action parses this one line by line, so a
+      # YAML sequence (or an inline comment) would not survive.
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          # On a pull request this still builds — it just doesn't
+          # publish. The build is the check.
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

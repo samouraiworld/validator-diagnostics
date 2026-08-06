@@ -52,6 +52,49 @@ is configured through `.env`. See [`.env.example`](.env.example) for the
 full list of variables and defaults. Uploaded archives and the submission
 log persist across `docker compose down` / `up` in named volumes.
 
+### Production deployment
+
+[`docker-compose.prod.yml`](docker-compose.prod.yml) runs the same stack
+from a published image instead of building from a checkout, so the
+deployment host needs neither the Go toolchain nor the source. Three
+files are enough: the compose file, `clamd.conf`, and your `.env`.
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+The portal image is `ghcr.io/samouraiworld/validator-diagnostics`,
+published by [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on
+every merge to `master` — but only after `go vet` and `go test` pass, so
+a red build never reaches the registry. Alongside `latest`, every commit
+is tagged `sha-<7 chars>`. That tag is the rollback path: set
+`PORTAL_IMAGE_TAG` in `.env` to a known-good one and re-run the command
+above.
+
+Two production-specific settings that development gets away with
+ignoring:
+
+- Set `SESSION_SECRET` and `ADMIN_SESSION_SECRET` explicitly. Left
+  unset, the portal generates a random secret per run, so any restart —
+  including an automatic one from `restart: unless-stopped` — signs
+  every validator and admin out mid-exercise.
+- Pin the upstream `clamav` and `minio` image tags once you have tested
+  against a given version. `stable` and `latest` both move underneath a
+  running deployment.
+
+For TLS, the compose file carries a commented Traefik v3 service with
+Let's Encrypt and an HTTP→HTTPS redirect; enabling it is a matter of
+uncommenting three blocks, setting `PORTAL_DOMAIN` and `ACME_EMAIL`, and
+removing the portal's `ports:` mapping so the plaintext port disappears.
+The instructions are in the file. If you put a different reverse proxy
+in front instead, note the two constraints Traefik is configured for
+there: **no request buffering**, and **no read/write timeout** on the
+route. A submission is a single long request — up to 4 GiB uploaded,
+then validated, then scanned by clamd for up to 15 minutes before the
+response is written. A proxy that buffers writes the whole archive to
+its own disk first; one with a finite timeout reports failure to the
+validator for a submission that actually succeeded.
+
 ### Flags and environment variables
 
 | Flag | Required | Description |
