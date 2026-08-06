@@ -142,19 +142,7 @@ func main() {
 	exerciseStore := exercise.NewFileStore(*exercisePath)
 	scoresStore := scoring.NewStore(*scoresPath)
 
-	// Deliberately left nil when -clamav-addr is unset, rather than filled
-	// with clamav.NoopScanner: a no-op scanner returns a clean verdict over
-	// every window, which would have the portal record complete coverage
-	// and the dashboard show a reassuring "scan ✓" on a submission no
-	// antivirus ever looked at. Nil records no coverage claim at all, which
-	// is the only honest answer. NoopScanner remains in the clamav package
-	// for tests, where claiming coverage is exactly what is wanted.
-	var avScanner clamav.Scanner
-	if *clamavAddr != "" {
-		avScanner = clamav.ClamdScanner{Addr: *clamavAddr, Timeout: *clamavTimeout}
-	} else {
-		log.Println("-clamav-addr not set: uploads will NOT be scanned for malware (fine for local dev, not for production)")
-	}
+	avScanner := configureAVScanner(*clamavAddr, *clamavTimeout)
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -277,6 +265,24 @@ var errNoStorageBackend = errUsage("either -upload-dir or -s3-bucket is required
 type errUsage string
 
 func (e errUsage) Error() string { return string(e) }
+
+// configureAVScanner selects the antivirus scanner uploads are checked
+// against, the same flags-in-decision-out shape as configureStore.
+//
+// Deliberately returns nil when addr is empty, rather than
+// clamav.NoopScanner: a no-op scanner returns a clean verdict over every
+// window, which would have the portal record complete coverage and the
+// dashboard show a reassuring "scan ✓" on a submission no antivirus ever
+// looked at. Nil records no coverage claim at all, which is the only
+// honest answer. NoopScanner remains in the clamav package for tests,
+// where claiming coverage is exactly what is wanted.
+func configureAVScanner(addr string, timeout time.Duration) clamav.Scanner {
+	if addr == "" {
+		log.Println("-clamav-addr not set: uploads will NOT be scanned for malware (fine for local dev, not for production)")
+		return nil
+	}
+	return clamav.ClamdScanner{Addr: addr, Timeout: timeout}
+}
 
 // loadOrGenerateSecret loads a hex-encoded HMAC secret from envVar, or
 // generates a random 32-byte one for this run if envVar is unset —

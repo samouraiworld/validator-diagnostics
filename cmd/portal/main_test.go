@@ -270,9 +270,38 @@ func TestSubmitHandlerFor_PassesTheAVScanBudget(t *testing.T) {
 }
 
 func TestSubmitHandlerFor_NilScannerStaysNil(t *testing.T) {
-	// The guard for the whole point of dropping the NoopScanner fallback:
-	// nothing between the flag and the handler may substitute a scanner.
+	// Guards only the field wiring in submitHandlerFor: a nil d.AVScanner
+	// must come out the other end still nil, not silently replaced.
+	// configureAVScanner is what actually decides whether main() wires a
+	// nil scanner in the first place — see
+	// TestConfigureAVScanner_EmptyAddrReturnsNil for that guard.
 	if h := submitHandlerFor(muxDeps{}); h.AVScanner != nil {
 		t.Errorf("AVScanner = %#v, want nil when none was wired", h.AVScanner)
+	}
+}
+
+func TestConfigureAVScanner_EmptyAddrReturnsNil(t *testing.T) {
+	// This is the actual regression site for "no clamd address configured
+	// must not silently become a working scanner": comparing the returned
+	// clamav.Scanner to nil catches both a typed-nil *clamav.ClamdScanner
+	// (which the == nil trap would miss if we asserted on a concrete
+	// type instead) and a clamav.NoopScanner{} substituted back in by
+	// mistake (which is a valid, non-nil Scanner value).
+	if s := configureAVScanner("", time.Minute); s != nil {
+		t.Errorf("configureAVScanner(\"\", ...) = %#v, want nil", s)
+	}
+}
+
+func TestConfigureAVScanner_NonEmptyAddrReturnsClamdScanner(t *testing.T) {
+	s := configureAVScanner("clamav:3310", 5*time.Minute)
+	got, ok := s.(clamav.ClamdScanner)
+	if !ok {
+		t.Fatalf("configureAVScanner(...) = %#v (%T), want clamav.ClamdScanner", s, s)
+	}
+	if got.Addr != "clamav:3310" {
+		t.Errorf("Addr = %q, want %q", got.Addr, "clamav:3310")
+	}
+	if got.Timeout != 5*time.Minute {
+		t.Errorf("Timeout = %v, want %v", got.Timeout, 5*time.Minute)
 	}
 }
