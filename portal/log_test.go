@@ -2,9 +2,12 @@ package portal
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/samourai/validator-diagnostics/clamav"
 )
 
 func TestNewSubmissionID_Unique(t *testing.T) {
@@ -136,5 +139,75 @@ func TestFileLog_Delete_UnknownID(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("len(entries) = %d, want 1 (unchanged)", len(entries))
+	}
+}
+
+func TestFileLog_RoundTripsScanCoverage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "submissions.jsonl")
+	l := NewFileLog(path)
+
+	want := &clamav.Coverage{Complete: false, Bytes: 34359738368}
+	if err := l.Record(context.Background(), Entry{ID: "a", Moniker: "samourai", Scan: want}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	entries, err := l.Entries()
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Scan == nil {
+		t.Fatal("Scan = nil, want the recorded coverage")
+	}
+	if *entries[0].Scan != *want {
+		t.Errorf("Scan = %+v, want %+v", *entries[0].Scan, *want)
+	}
+}
+
+func TestFileLog_LegacyLineHasNoScanClaim(t *testing.T) {
+	// Lines written before windowed scanning must decode as "unknown", not
+	// as "partially scanned": the old whole-archive path did scan them in
+	// full, and a false partial badge would be as misleading as a false
+	// clean one.
+	path := filepath.Join(t.TempDir(), "submissions.jsonl")
+	line := `{"id":"a","moniker":"samourai","operator_address":"g1x","filename":"f.tar.gz","submitted_at":"2026-08-01T10:00:00Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	entries, err := NewFileLog(path).Entries()
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if entries[0].Scan != nil {
+		t.Errorf("Scan = %+v, want nil for a line that predates the field", entries[0].Scan)
+	}
+}
+
+func TestFileLog_DeletePreservesScanCoverage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "submissions.jsonl")
+	l := NewFileLog(path)
+
+	if err := l.Record(context.Background(), Entry{ID: "a", Scan: &clamav.Coverage{Complete: true, Bytes: 10}}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := l.Record(context.Background(), Entry{ID: "b", Scan: &clamav.Coverage{Complete: true, Bytes: 20}}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if _, err := l.Delete("a"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	entries, err := l.Entries()
+	if err != nil {
+		t.Fatalf("Entries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Scan == nil || entries[0].Scan.Bytes != 20 {
+		t.Errorf("Scan = %+v, want the surviving entry's coverage intact after the rewrite", entries[0].Scan)
 	}
 }

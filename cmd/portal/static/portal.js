@@ -40,7 +40,19 @@ function formatBytes(n) {
   // Divides by 1024, so the labels are the binary units (MiB/GiB), not
   // the decimal ones (MB/GB) — matches the README, .env.example, and this
   // page's own help text, which all quote limits in MiB/GiB.
-  const mib = n / (1024 * 1024);
+  //
+  // Below 1 MiB this used to floor to "0.0 MiB" for any value; bytes and
+  // KiB get their own bands instead of being rounded away. 1 MiB and up
+  // is unchanged from before. Duplicated in admin.js — keep both copies
+  // identical.
+  if (n < 1024) {
+    return n + " B";
+  }
+  const kib = n / 1024;
+  if (kib < 1024) {
+    return kib.toFixed(1) + " KiB";
+  }
+  const mib = kib / 1024;
   if (mib >= 1024) {
     return (mib / 1024).toFixed(1) + " GiB";
   }
@@ -66,18 +78,152 @@ function announcePhase(message) {
   document.getElementById("upload-phase").textContent = message;
 }
 
+// setUploadProcessing marks the transfer itself finished. It is called from
+// the first poll the server answers, not from an upload event: xhr.upload's
+// "load" was observed never firing at all for a multi-gigabyte body — not
+// even "loadend", which is meant to fire unconditionally — which silently
+// disabled every server-side phase this page reports. The server having
+// started work is proof enough that the bytes arrived, and it is a fact the
+// page can obtain without trusting a browser event.
 function setUploadProcessing() {
-  // Removing value — rather than pinning it to 100 — is what switches the
-  // native element into its indeterminate animation. The bytes have left
-  // the browser, but the server still has to scan, validate, and store
-  // them, and that phase reports no progress of its own. A bar frozen at
-  // 100% would read as a hang.
-  document.getElementById("upload-bar").removeAttribute("value");
-  const message =
-    "Upload complete. The server is scanning and validating your archive — " +
-    "this can take several minutes for a large file. Keep this tab open.";
-  document.getElementById("upload-status").textContent = message;
-  announcePhase(message);
+  // Pinned to 100 rather than made indeterminate: this bar now means the
+  // transfer only, and the transfer is genuinely done. #server-bar below
+  // carries the "still working" animation from here on.
+  document.getElementById("upload-bar").value = 100;
+  document.getElementById("upload-status").textContent = "Upload complete.";
+}
+
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) {
+    return s + "s";
+  }
+  return Math.floor(s / 60) + "m " + (s % 60) + "s";
+}
+
+// PHASE_SENTENCES is what the validator reads for each server-side phase
+// (portal.Phase). A phase this page does not know about falls back to the
+// generic message rather than rendering a raw identifier.
+const PHASE_SENTENCES = {
+  validating: "Checking the archive's structure.",
+  scanning: "Antivirus scan in progress.",
+  storing: "Storing the archive.",
+  scoring: "Scoring your submission.",
+};
+
+let announcedPhase = null;
+
+// renderServerProgress paints one poll result. The scanning phase gets an
+// indeterminate bar and absolute numbers on purpose: the log's decompressed
+// size is not known until it has been decompressed, so there is no honest
+// denominator, and a bar driven by the budget instead would glide along and
+// then jump to done. Storing is the opposite case — its total is the
+// archive's own size — so it gets a real percentage.
+function renderServerProgress(p) {
+  const bar = document.getElementById("server-bar");
+  const status = document.getElementById("server-status");
+  const detail = document.getElementById("upload-detail");
+
+  // The first answered poll is what proves the bytes landed, so it is what
+  // finishes the transfer bar and reveals this one.
+  setUploadProcessing();
+  document.getElementById("server-progress").hidden = false;
+
+  const sentence = PHASE_SENTENCES[p.phase] || "The server is processing your archive.";
+  let detailText = "";
+
+  if (p.phase === "storing" && p.total > 0) {
+    const pct = Math.round((p.bytes / p.total) * 100);
+    bar.value = pct;
+    detailText = `${formatBytes(p.bytes)} / ${formatBytes(p.total)} (${pct}%)`;
+  } else {
+    bar.removeAttribute("value");
+    if (p.phase === "scanning") {
+      const elapsed = (Date.now() - Date.parse(p.phase_started_at)) / 1000;
+      const rate = elapsed > 0 ? p.bytes / elapsed : 0;
+      detailText =
+        `${formatBytes(p.bytes)} streamed · ${formatDuration(elapsed)} · ${formatBytes(rate)}/s`;
+    }
+  }
+
+  status.textContent = sentence + " Keep this tab open.";
+  detail.textContent = detailText;
+
+  // Announced only when the phase itself changes — the byte count beside it
+  // refreshes every two seconds and must never reach the live region.
+  if (p.phase !== announcedPhase) {
+    announcedPhase = p.phase;
+    announcePhase(sentence);
+  }
+}
+
+let progressTimer = null;
+
+// startProgressPolling opens the second connection this page needs: the
+// submission's own response cannot report progress without freezing its
+// status code, so progress arrives on its own request.
+//
+// Called as soon as the request is sent, not when the upload finishes: a
+// poll that arrives too early is answered 404, which ProgressHandler
+// documents as a normal "not yet". Waiting for xhr.upload's "load" instead
+// made the whole feature depend on a single browser event that was observed
+// never firing for a multi-gigabyte body, and it reported nothing at all.
+//
+// A 404 stays silent, being the expected answer both before the server
+// reaches Begin and after it has responded. A 401 does not: it means the
+// session expired mid-submission, progress is gone for good, and the page
+// would otherwise sit on a stale phase forever with no explanation.
+function startProgressPolling(token) {
+  stopProgressPolling();
+  announcedPhase = null;
+
+  progressTimer = setInterval(async () => {
+    let resp;
+    try {
+      resp = await fetch("/submit/progress", {
+        headers: { Authorization: "Bearer " + token },
+      });
+    } catch (err) {
+      // Says nothing about the upload, which is being decided on the other
+      // connection entirely. Keep polling.
+      return;
+    }
+
+    if (resp.status === 401) {
+      // Unrecoverable: the token cannot be refreshed without another
+      // signature, and every later poll would fail the same way. The upload
+      // itself authenticated once, at the start, and carries on unaffected.
+      stopProgressPolling();
+      document.getElementById("server-status").textContent =
+        "Progress reporting stopped: this session expired while the server was still working. " +
+        "Your submission is still running — keep this tab open and wait for the result.";
+      return;
+    }
+    if (!resp.ok) {
+      return;
+    }
+
+    let p;
+    try {
+      p = await resp.json();
+    } catch (err) {
+      return;
+    }
+
+    // The submission may have completed while this poll was in flight;
+    // painting now would resurrect a panel the load handler just hid.
+    if (progressTimer === null) {
+      return;
+    }
+    renderServerProgress(p);
+  }, 2000);
+}
+
+function stopProgressPolling() {
+  if (progressTimer !== null) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
 }
 
 document.getElementById("get-challenge").addEventListener("click", async () => {
@@ -192,6 +338,13 @@ document.getElementById("submit-archive").addEventListener("click", () => {
   button.disabled = true;
   progress.hidden = false;
   setUploadProgress(0, file.size);
+  // Cleared and re-hidden explicitly: renderServerProgress only touches these
+  // once the first poll lands, so without this a second submission would show
+  // the previous run's phase and byte line until then.
+  document.getElementById("server-progress").hidden = true;
+  document.getElementById("server-status").textContent = "";
+  document.getElementById("upload-detail").textContent = "";
+  document.getElementById("server-bar").removeAttribute("value");
   announcePhase("Upload started.");
 
   // fetch() reports no progress for the request body, so this one call
@@ -206,11 +359,14 @@ document.getElementById("submit-archive").addEventListener("click", () => {
     }
   });
 
-  // Fires when the last byte is handed to the network stack — which is
-  // not the same as the server having received and processed it.
-  xhr.upload.addEventListener("load", setUploadProcessing);
+  // Deliberately no xhr.upload "load" handler: it was observed never firing
+  // for a multi-gigabyte body, and gating the progress display on it meant
+  // the server-side phases were never shown at all. Polling starts with the
+  // request instead (see startProgressPolling), and the first answered poll
+  // is what marks the transfer complete.
 
   xhr.addEventListener("load", () => {
+    stopProgressPolling();
     progress.hidden = true;
     button.disabled = false;
 
@@ -226,10 +382,18 @@ document.getElementById("submit-archive").addEventListener("click", () => {
   });
 
   xhr.addEventListener("error", () => {
+    stopProgressPolling();
     progress.hidden = true;
     button.disabled = false;
     setError("upload-error", "Network error while uploading.");
   });
 
+  xhr.addEventListener("abort", () => {
+    stopProgressPolling();
+    progress.hidden = true;
+    button.disabled = false;
+  });
+
   xhr.send(form);
+  startProgressPolling(sessionToken);
 });

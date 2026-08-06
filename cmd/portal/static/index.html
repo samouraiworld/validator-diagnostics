@@ -122,11 +122,33 @@
   <input type="file" id="archive-file" accept=".gz,.tar.gz">
   <button id="submit-archive">Submit</button>
   <div id="upload-progress" hidden>
+    <!-- Two independent bars, because they measure two different things and
+         one of them stalls while the other runs. The transfer bar is driven
+         by the browser's own XHR upload events; the server bar is driven by
+         polling /submit/progress. Reusing a single bar for both used to hide
+         the fact that the server phase was reporting nothing at all. -->
+    <label for="upload-bar">Transfer</label>
     <progress id="upload-bar" max="100"></progress>
     <!-- Updated on every progress event (many times per second for a large
          upload) — visual only, so aria-live is off here to avoid flooding
          a screen reader with a running byte count. -->
     <p id="upload-status" aria-live="off"></p>
+
+    <!-- Revealed by the first poll that succeeds, not by an upload event:
+         the server is the only thing that can say it has started work. -->
+    <div id="server-progress" hidden>
+      <label for="server-bar">Server processing</label>
+      <progress id="server-bar" max="100"></progress>
+      <!-- Which phase the server is in. Visual only, same reasoning as
+           #upload-status above. -->
+      <p id="server-status" aria-live="off"></p>
+      <!-- Byte counts for the server-side phases, refreshed every couple of
+           seconds while the server works — so aria-live stays off here for the
+           same reason it is off above. #upload-phase below is the announced
+           surface, and it only changes when the phase itself does. -->
+      <p id="upload-detail" aria-live="off"></p>
+    </div>
+
     <!-- Assistive-tech-facing counterpart: only changes at phase
          transitions (upload started / upload complete), so it announces
          twice per submission instead of once per progress event. -->

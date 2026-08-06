@@ -3,15 +3,17 @@ services:
     image: clamav/clamav:stable
     volumes:
       - clamav-data:/var/lib/clamav
-      # Raises clamd's stock stream limit to the 2 GiB the portal accepts,
-      # and makes it report content it skipped for exceeding a limit
-      # instead of answering OK — see the file's own header. Note this
-      # replaces the image's config wholesale, so anything the stock file
-      # set is gone unless clamd.conf sets it too.
+      # Raises clamd's stock stream limit to comfortably cover one scan
+      # window (metadata.json, or a 1 GiB gnoland.log.gz window plus its
+      # 1 MiB overlap), and makes it report content it skipped for
+      # exceeding a limit instead of answering OK — see the file's own
+      # header. Note this replaces the image's config wholesale, so
+      # anything the stock file set is gone unless clamd.conf sets it too.
       - ./clamd.conf:/etc/clamav/clamd.conf:ro
       # clamd spools each INSTREAM body here (TemporaryDirectory in
-      # clamd.conf). On the container's writable layer, concurrent 2 GiB
-      # uploads would eat the host's Docker storage instead.
+      # clamd.conf). On the container's writable layer, concurrent ~1 GiB
+      # scan windows across concurrent uploads would eat the host's Docker
+      # storage instead.
       - clamav-tmp:/var/tmp/clamav
     # clamd holds the whole signature database resident (~1-2 GB). Without
     # a ceiling a spike takes the host down with it; with one, the
@@ -77,12 +79,33 @@ services:
       - -scores-path=/data/scores.json
       - -clamav-addr=clamav:3310
       - -clamav-timeout=15m
-      # Must stay <= clamd.conf's StreamMaxLength.
-      - -max-upload-size=${MAX_UPLOAD_SIZE:-2147483647}
-      # Streamed, not buffered — see submission.ValidateArchive and
-      # submission.OpenLog. The ceiling here is decompression work, not
-      # resident memory.
-      - -max-log-size=${MAX_LOG_SIZE:-268435456}
+      # The upload authenticates once, when the request starts, but the page
+      # re-authenticates on every progress poll — so a TTL shorter than a
+      # submission takes leaves the submission running while its progress
+      # display goes dark. A 4 GiB archive transfers, validates, scans and
+      # stores well past the 5-minute default, so this covers the worst case
+      # the upload ceiling allows rather than the typical one.
+      - -session-ttl=${SESSION_TTL:-2h}
+      # 4 GiB. clamd never sees more than a 1 GiB scan window of this at a
+      # time, so raising it further is a disk/S3/time question, not a
+      # clamd.conf one — see README.md's "Upload size and ClamAV".
+      # Source of truth: cmd/portal/main.go's defaultMaxUploadSize
+      # constant; this file can't import a Go constant, so keep the two
+      # numbers in step by hand.
+      - -max-upload-size=${MAX_UPLOAD_SIZE:-4294967296}
+      # 4 GiB, matching MAX_UPLOAD_SIZE. Streamed, not buffered — see
+      # submission.ValidateArchive and submission.OpenLog. The ceiling
+      # here is decompression work, not resident memory.
+      # Source of truth: cmd/portal/main.go's defaultMaxLogSize constant;
+      # this file can't import a Go constant, so keep the two numbers in
+      # step by hand.
+      - -max-log-size=${MAX_LOG_SIZE:-4294967296}
+      # Decompressed bytes of gnoland.log.gz the antivirus may examine.
+      # Past this the submission is accepted and recorded as partially
+      # scanned — the cap is bomb defence, not cost control.
+      # Source of truth: clamav.DefaultScanBudget; this file can't import
+      # a Go constant, so keep the two numbers in step by hand.
+      - -av-scan-budget=${AV_SCAN_BUDGET:-34359738368}
     volumes:
       - portal-logs:/data
     ports:

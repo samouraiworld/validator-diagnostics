@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/samourai/validator-diagnostics/clamav"
 	"github.com/samourai/validator-diagnostics/internal/atomicfile"
 )
 
@@ -27,6 +28,20 @@ type Entry struct {
 	OperatorAddress string    `json:"operator_address"`
 	Filename        string    `json:"filename"`
 	SubmittedAt     time.Time `json:"submitted_at"`
+
+	// Scan is what the antivirus actually examined. Non-nil is an
+	// affirmative claim: a real Scanner was wired and returned a clean
+	// verdict over metadata.json plus Bytes bytes of decompressed
+	// gnoland.log.gz — Bytes counts only the log, since metadata.json is
+	// scanned separately, whole, and is not counted towards it. Nil claims
+	// nothing — either the entry predates windowed scanning, or no scanner
+	// was wired at all. There is nothing in between: a scan that errors, or
+	// finds something, fails the submission outright, so no Entry is
+	// written for it.
+	//
+	// clamav.Coverage's JSON tags are a persisted format from here on —
+	// they are what submissions.jsonl holds.
+	Scan *clamav.Coverage `json:"scan,omitempty"`
 }
 
 // NewSubmissionID returns a random, URL-safe identifier for a new

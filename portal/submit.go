@@ -6,8 +6,11 @@
 package portal
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,16 +27,17 @@ import (
 
 const (
 	// defaultMaxUploadSize is the fallback for a SubmitHandler built
-	// without MaxUploadSize. Deliberately below prd.md's "for example
-	// 10 GB": with an AV scanner wired in, anything above clamd's
-	// StreamMaxLength is guaranteed to 503, and cmd/portal and
-	// clamd.conf both standardise on this same value. Change this and you
-	// are changing what an unconfigured handler accepts but clamd won't
-	// scan — see the README section "Upload size and ClamAV".
-	//
-	// 2 GiB minus one byte, not a round 2 GiB: libclamav cannot scan a
-	// file of 2147483648 bytes or more, and no clamd setting lifts that.
-	defaultMaxUploadSize = 2147483647
+	// without MaxUploadSize — currently only cmd/portal-dev, which wires
+	// no AVScanner and no MaxUploadSize at all. The archive is no longer
+	// scanned as a file (clamd, when there is one, only ever sees
+	// extracted content: metadata.json whole, then the decompressed log
+	// in 1 GiB windows), so this value has nothing to do with clamd's
+	// StreamMaxLength or libclamav's scan ceiling — matching cmd/portal's
+	// defaultMaxUploadSize is just consistency between the production
+	// binary and the dev tool, not a scan requirement. Change this and you
+	// are changing what an unconfigured handler accepts — see the README
+	// section "Upload size and ClamAV".
+	defaultMaxUploadSize = 4294967296 // 4 GiB; matches cmd/portal's defaultMaxUploadSize
 
 	// multipartMemoryThreshold is how much of the request Go buffers in
 	// memory before spilling additional parts to its own temp files —
@@ -52,11 +56,15 @@ type SubmitHandler struct {
 	// Optional — a nil Log disables recording.
 	Log Log
 
-	// AVScanner scans uploaded archives for malware before they're
-	// stored (prd.md, "Security Considerations" — ClamAV defense in
-	// depth). A nil AVScanner disables scanning; cmd/portal always
-	// wires clamav.NoopScanner explicitly instead of leaving this nil,
-	// so nil only shows up in tests that don't care about the AV step.
+	// AVScanner scans the archive's extracted content for malware before
+	// it is stored (prd.md, "Security Considerations" — "Run an antivirus
+	// scan (e.g. ClamAV) on extracted content").
+	//
+	// A nil AVScanner disables scanning entirely, and that is a real
+	// configuration, not just a test shortcut: cmd/portal-dev runs this
+	// way, and cmd/portal does too when -clamav-addr is unset. Nil also
+	// means no Entry.Scan is recorded — the dashboard must not vouch for a
+	// submission nothing examined.
 	AVScanner clamav.Scanner
 
 	// Exercise and Scores wire in the Phase 3 automatic checks and
@@ -72,6 +80,16 @@ type SubmitHandler struct {
 	// MaxUploadSize caps the whole request body. Zero uses
 	// defaultMaxUploadSize.
 	MaxUploadSize int64
+
+	// AVScanBudget caps how many decompressed bytes of gnoland.log.gz are
+	// submitted to the scanner. Zero uses clamav.DefaultScanBudget.
+	// Exceeding it is recorded as partial coverage, never a rejection.
+	AVScanBudget int64
+
+	// Progress publishes server-side progress for the upload page to poll
+	// (see ProgressHandler). Optional — a nil Progress disables reporting
+	// and changes nothing else about how a submission is handled.
+	Progress *ProgressTracker
 }
 
 type submitResponse struct {
@@ -113,6 +131,14 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.MultipartForm.RemoveAll()
 
+	// Tracking starts here, not earlier: everything before this was reading
+	// the request body, which the browser already observes through its own
+	// upload progress events. The page polls from the moment its last byte
+	// leaves, so it will see 404s until this line runs — which is correct,
+	// and which it treats as "not yet".
+	progress := h.Progress.Begin(operatorAddr.String())
+	defer progress.Done()
+
 	file, header, err := r.FormFile("archive")
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: `missing "archive" file field`})
@@ -130,6 +156,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// in memory or spilled it to a temp file above — so ValidateArchive,
 	// the AV scan, and Store.Save can each take their own full pass
 	// over it without us buffering a second copy ourselves.
+	progress.Phase(PhaseValidating, 0)
 	archiveResult, err := submission.ValidateArchive(r.Context(), file, h.ArchiveOptions)
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: err.Error()})
@@ -159,13 +186,27 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// scanCoverage is nil unless a scanner actually ran: see Entry.Scan.
+	var scanCoverage *clamav.Coverage
+
 	if h.AVScanner != nil {
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to rewind upload"})
+		progress.Phase(PhaseScanning, 0)
+		// Always wrapped: Add on a nil handle is a no-op, so this needs no
+		// guard for a handler built without a tracker.
+		scanner := countingScanner{inner: h.AVScanner, add: progress.Add}
+		verdict, coverage, err := scanArchive(r.Context(), file, h.ArchiveOptions, archiveResult.Metadata, scanner, h.AVScanBudget)
+		switch {
+		case errors.Is(err, errUnreadableLog):
+			// ValidateArchive only checked this entry's two magic bytes,
+			// so a log that cannot be decompressed at all gets this far.
+			// Nothing in it was ever readable, so nothing in it can be
+			// scanned, and storing it would be exactly the fail-open the
+			// AV step exists to prevent.
+			writeSubmitResult(w, http.StatusBadRequest, submitResponse{
+				Error: fmt.Sprintf("%s could not be decompressed, so it could not be scanned: %v", submission.LogFileName, err),
+			})
 			return
-		}
-		verdict, err := h.AVScanner.Scan(r.Context(), file)
-		if err != nil {
+		case err != nil:
 			log.Printf("antivirus scan for %s failed: %v", header.Filename, err)
 			writeSubmitResult(w, http.StatusServiceUnavailable, submitResponse{
 				Error: "antivirus scan unavailable, please try again shortly",
@@ -178,6 +219,14 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if !coverage.Complete {
+			// Accepted, but never silently: the budget running out and the
+			// log's stream breaking are the only two incomplete outcomes,
+			// and Bytes against the budget says which one happened.
+			log.Printf("antivirus coverage incomplete for %s: %d bytes scanned (budget %d)",
+				header.Filename, coverage.Bytes, h.avScanBudget())
+		}
+		scanCoverage = &coverage
 	}
 
 	submissionID, err := NewSubmissionID()
@@ -191,7 +240,15 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.Save(r.Context(), header.Filename, file, header.Size); err != nil {
+	// file is seekable (see the comment above ValidateArchive) and
+	// storage.S3Store.Save depends on that — its checksum middleware
+	// requires a seekable body over plain HTTP, and its retry middleware
+	// rewinds one after a transient failure — so this is wrapped in
+	// countingSeeker, which forwards Seek, not the plain countingReader
+	// the antivirus path above uses for its genuinely non-seekable gzip
+	// stream.
+	progress.Phase(PhaseStoring, header.Size)
+	if err := h.Store.Save(r.Context(), header.Filename, &countingSeeker{r: file, add: progress.Add}, header.Size); err != nil {
 		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to store archive"})
 		return
 	}
@@ -205,6 +262,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	recordedAt := time.Now().UTC()
 
 	if h.Exercise != nil {
+		progress.Phase(PhaseScoring, 0)
 		cfg, err := h.Exercise.Get()
 		if err != nil {
 			log.Printf("scoring: unable to read exercise config for %s: %v", header.Filename, err)
@@ -266,6 +324,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			OperatorAddress: operatorAddr.String(),
 			Filename:        header.Filename,
 			SubmittedAt:     recordedAt,
+			Scan:            scanCoverage,
 		}
 		if err := h.Log.Record(r.Context(), entry); err != nil {
 			// The archive is already safely stored — a logging failure
@@ -310,4 +369,60 @@ func autoChecks(ctx context.Context, file io.ReadSeeker, opts submission.Options
 
 	genesisMatch, versionSupported, window = scoring.AutoChecks(meta, logGz, cfg)
 	return genesisMatch, versionSupported, window, nil
+}
+
+// errUnreadableLog marks a gnoland.log.gz whose gzip stream could not be
+// opened at all. It is distinct from a scanner failure because the two are
+// answered differently: this is the submitter's problem (400), a scanner
+// failure is ours (503).
+var errUnreadableLog = errors.New("not a readable gzip stream")
+
+// scanArchive submits the archive's extracted content to scanner: first
+// metadata.json, already in memory and small enough to scan whole, then the
+// decompressed log in windows under budget.
+//
+// clamd never sees the raw .tar.gz. libclamav refuses to scan any single
+// file of 2 GiB or more, and that ceiling applies to every file it extracts
+// — including the decompressed log — so the archive is taken apart here
+// instead, which is also what prd.md asks for ("Run an antivirus scan on
+// extracted content").
+//
+// file must be the already-validated upload; it is rewound first, so callers
+// must not rely on its offset afterwards. This is a function rather than an
+// inline block so the log stream is closed as soon as the scan ends rather
+// than at the end of the whole request.
+func scanArchive(ctx context.Context, file io.ReadSeeker, opts submission.Options, metadata []byte, scanner clamav.Scanner, budget int64) (clamav.Verdict, clamav.Coverage, error) {
+	verdict, err := scanner.Scan(ctx, bytes.NewReader(metadata))
+	if err != nil {
+		return clamav.Verdict{}, clamav.Coverage{}, fmt.Errorf("scanning %s: %w", submission.MetadataFileName, err)
+	}
+	if verdict.Infected {
+		return verdict, clamav.Coverage{}, nil
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return clamav.Verdict{}, clamav.Coverage{}, fmt.Errorf("rewinding upload: %w", err)
+	}
+	logGz, err := submission.OpenLog(ctx, file, opts)
+	if err != nil {
+		return clamav.Verdict{}, clamav.Coverage{}, err
+	}
+	defer logGz.Close()
+
+	gz, err := gzip.NewReader(logGz)
+	if err != nil {
+		return clamav.Verdict{}, clamav.Coverage{}, fmt.Errorf("%w: %v", errUnreadableLog, err)
+	}
+	defer gz.Close()
+
+	return clamav.WindowedScanner{Scanner: scanner, Budget: budget}.ScanStream(ctx, gz)
+}
+
+// avScanBudget is the effective budget, for logging: WindowedScanner applies
+// the same fallback internally.
+func (h *SubmitHandler) avScanBudget() int64 {
+	if h.AVScanBudget <= 0 {
+		return clamav.DefaultScanBudget
+	}
+	return h.AVScanBudget
 }

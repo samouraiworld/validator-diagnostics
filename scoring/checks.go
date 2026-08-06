@@ -12,14 +12,13 @@ import (
 	"github.com/samourai/validator-diagnostics/submission"
 )
 
-// maxLogScanBytes bounds how much *decompressed* plaintext scanLogWindow
-// will read out of gnoland.log.gz, independent of the compressed-size
-// cap submission.ValidateArchive enforces and submission.OpenLog re-applies.
-// This is the inner-layer equivalent of prd.md's "decompressed-size limit,
-// independent from the compressed upload size limit": gnoland.log.gz's
-// own content is itself gzip-compressed plaintext that ValidateArchive
-// never decompresses, so this is the first place that decompression
-// happens, and it needs its own bomb protection.
+// maxLogWindowBytes bounds how much *decompressed* plaintext scanLogWindow
+// will read out of gnoland.log.gz, independent of the compressed-size cap
+// submission.ValidateArchive enforces and submission.OpenLog re-applies, and
+// independent of the antivirus's own decompressed budget
+// (clamav.DefaultScanBudget, 32 GiB). Two budgets over the same bytes, for
+// unrelated reasons: exceeding this one costs partial credit via
+// LogWindowCheck.Truncated, exceeding the antivirus's costs coverage.
 //
 // It is set well above a plausible validator log rather than at the
 // smallest workable value, because the budget running out is not a free
@@ -28,7 +27,7 @@ import (
 // unverified (see LogWindowCheck.Truncated). Nothing is retained as it
 // scans, so the cost of a large budget is decompression time, not
 // memory.
-const maxLogScanBytes = 1 << 30 // 1 GiB of plaintext
+const maxLogWindowBytes = 1 << 30 // 1 GiB of plaintext
 
 // maxLogLineBytes caps a single buffered line. A line longer than this
 // ends the scan (bufio.ErrTooLong), which counts as truncation for the
@@ -66,7 +65,7 @@ func AutoChecks(meta submission.Metadata, logGz io.Reader, cfg exercise.Config) 
 		}
 	}
 
-	window = scanLogWindow(logGz, cfg, maxLogScanBytes)
+	window = scanLogWindow(logGz, cfg, maxLogWindowBytes)
 	return genesisMatch, versionSupported, window
 }
 
@@ -76,7 +75,7 @@ func AutoChecks(meta submission.Metadata, logGz io.Reader, cfg exercise.Config) 
 // yields the zero LogWindowCheck rather than an error, since gnoland's
 // exact log format isn't part of prd.md's contract. budget is a
 // parameter rather than a constant so tests can exercise the truncation
-// path without generating maxLogScanBytes of input.
+// path without generating maxLogWindowBytes of input.
 func scanLogWindow(logGz io.Reader, cfg exercise.Config, budget int64) LogWindowCheck {
 	gz, err := gzip.NewReader(logGz)
 	if err != nil {
