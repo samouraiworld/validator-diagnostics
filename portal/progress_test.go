@@ -1,9 +1,14 @@
 package portal
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/samourai/validator-diagnostics/auth"
 )
 
 func TestProgressTracker_BeginGetDone(t *testing.T) {
@@ -227,5 +232,100 @@ func TestProgressTracker_NilIsUsable(t *testing.T) {
 
 	if _, ok := tracker.Get("g1alice"); ok {
 		t.Error("a nil tracker reported progress")
+	}
+}
+
+func TestProgressHandler_RequiresASession(t *testing.T) {
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	handler := ProgressHandler(sessions, NewProgressTracker())
+
+	req := httptest.NewRequest(http.MethodGet, "/submit/progress", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 without a session", rec.Code)
+	}
+}
+
+func TestProgressHandler_RejectsNonGET(t *testing.T) {
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	handler := ProgressHandler(sessions, NewProgressTracker())
+
+	req := httptest.NewRequest(http.MethodPost, "/submit/progress", nil)
+	req.Header.Set("Authorization", "Bearer "+sessions.Issue(testOperatorAddr()))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestProgressHandler_NotFoundWhenNothingInFlight(t *testing.T) {
+	// The page polls from the moment its last byte leaves the browser, which
+	// is before the server has finished reading the body — so this is a
+	// normal, frequent answer, not an error condition.
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	handler := ProgressHandler(sessions, NewProgressTracker())
+
+	req := httptest.NewRequest(http.MethodGet, "/submit/progress", nil)
+	req.Header.Set("Authorization", "Bearer "+sessions.Issue(testOperatorAddr()))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestProgressHandler_ServesTheOperatorsProgress(t *testing.T) {
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	tracker := NewProgressTracker()
+	addr := testOperatorAddr()
+
+	h := tracker.Begin(addr.String())
+	h.Phase(PhaseStoring, 2048)
+	h.Add(512)
+
+	handler := ProgressHandler(sessions, tracker)
+	req := httptest.NewRequest(http.MethodGet, "/submit/progress", nil)
+	req.Header.Set("Authorization", "Bearer "+sessions.Issue(addr))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got Progress
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding body %q: %v", rec.Body.String(), err)
+	}
+	if got.Phase != PhaseStoring || got.Bytes != 512 || got.Total != 2048 {
+		t.Errorf("got %+v, want {Phase:storing Bytes:512 Total:2048}", got)
+	}
+	if got.PhaseStartedAt.IsZero() {
+		t.Error("PhaseStartedAt is zero; the page needs it to compute elapsed time")
+	}
+}
+
+func TestProgressHandler_NeverServesAnotherOperatorsProgress(t *testing.T) {
+	// The session is what selects the row, so this is the whole of the
+	// endpoint's authorization. Assert it directly.
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	tracker := NewProgressTracker()
+
+	other := tracker.Begin("g1someoneelse")
+	other.Phase(PhaseScanning, 0)
+	other.Add(4096)
+
+	handler := ProgressHandler(sessions, tracker)
+	req := httptest.NewRequest(http.MethodGet, "/submit/progress", nil)
+	req.Header.Set("Authorization", "Bearer "+sessions.Issue(testOperatorAddr()))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404: a session must only ever reach its own row", rec.Code)
 	}
 }

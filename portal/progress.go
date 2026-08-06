@@ -1,8 +1,12 @@
 package portal
 
 import (
+	"encoding/json"
+	"net/http"
 	"sync"
 	"time"
+
+	"github.com/samourai/validator-diagnostics/auth"
 )
 
 // Phase names the server-side stage a submission has reached. The transfer
@@ -204,4 +208,41 @@ func (h *ProgressHandle) update(f func(e *progressEntry, now time.Time)) {
 	now := h.tracker.now()
 	f(e, now)
 	e.lastUpdate = now
+}
+
+// ProgressHandler serves GET /submit/progress: the server-side progress of
+// the calling operator's in-flight submission, for the upload page to poll
+// while its POST /submit is still running.
+//
+// It exists as a separate request because the submission's own response
+// cannot carry progress: its status is not decided until the very end — 422
+// for an infected archive, 503 for a scanner failure, 400 for a log that
+// cannot be decompressed — and a streaming body would force the status to be
+// written first, collapsing all of those into a 200.
+//
+// 404 is a normal answer, not an error: the page starts polling when its last
+// byte leaves the browser, which is before the server has finished reading
+// the request body, and it keeps polling until the response lands.
+func ProgressHandler(sessions *auth.SessionSigner, tracker *ProgressTracker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		addr, err := auth.RequireSession(sessions, r)
+		if err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		progress, ok := tracker.Get(addr.String())
+		if !ok {
+			http.Error(w, "no submission in flight", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(progress)
+	}
 }
