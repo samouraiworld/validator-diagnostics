@@ -79,6 +79,13 @@ services:
       - -scores-path=/data/scores.json
       - -clamav-addr=clamav:3310
       - -clamav-timeout=15m
+      # The upload authenticates once, when the request starts, but the page
+      # re-authenticates on every progress poll — so a TTL shorter than a
+      # submission takes leaves the submission running while its progress
+      # display goes dark. A 4 GiB archive transfers, validates, scans and
+      # stores well past the 5-minute default, so this covers the worst case
+      # the upload ceiling allows rather than the typical one.
+      - -session-ttl=${SESSION_TTL:-2h}
       # 4 GiB. clamd never sees more than a 1 GiB scan window of this at a
       # time, so raising it further is a disk/S3/time question, not a
       # clamd.conf one — see README.md's "Upload size and ClamAV".
