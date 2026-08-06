@@ -90,7 +90,15 @@ func (w WindowedScanner) ScanStream(ctx context.Context, r io.Reader) (Verdict, 
 		// an exact multiple of the window capacity doesn't end with a
 		// window holding nothing but the previous one's overlap.
 		var head [1]byte
-		if n, _ := io.ReadFull(bounded, head[:]); n == 0 {
+		n, err := io.ReadFull(bounded, head[:])
+		if n == 0 {
+			// Zero bytes and io.EOF means the stream genuinely ended; zero
+			// bytes and any other error means r broke. Those are not the
+			// same fact, and folding the latter into "ended" would let a
+			// scan that never finished get reported as complete.
+			if err != nil && err != io.EOF {
+				return Verdict{}, Coverage{}, err
+			}
 			break
 		}
 
@@ -138,8 +146,12 @@ func (w WindowedScanner) complete(bounded *io.LimitedReader, r io.Reader) bool {
 		return true
 	}
 	var probe [1]byte
-	n, _ := io.ReadFull(r, probe[:])
-	return n == 0
+	n, err := io.ReadFull(r, probe[:])
+	// A probe that fails for a reason other than EOF found out nothing
+	// about whether the stream ended — it must not be read as "complete".
+	// That's the same failure mode as the head peek above, just off by one
+	// window: the source broke instead of running out.
+	return n == 0 && (err == nil || err == io.EOF)
 }
 
 func (w WindowedScanner) windowSize() int64 {

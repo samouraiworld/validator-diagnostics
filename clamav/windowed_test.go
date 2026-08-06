@@ -65,6 +65,23 @@ func seq(n int) []byte {
 	return out
 }
 
+// failingReader yields its data and then fails, so a source that breaks is
+// distinguishable from one that ended.
+type failingReader struct {
+	data []byte
+	off  int
+	err  error
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if f.off >= len(f.data) {
+		return 0, f.err
+	}
+	n := copy(p, f.data[f.off:])
+	f.off += n
+	return n, nil
+}
+
 func TestWindowedScanner_ShorterThanOneWindow(t *testing.T) {
 	fake := &recordingScanner{}
 	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 1000}
@@ -197,6 +214,52 @@ func TestWindowedScanner_BudgetExactlyEqualToStream(t *testing.T) {
 	}
 	if !cov.Complete {
 		t.Error("Complete = false, want true: the stream ended exactly at the budget, it was not truncated")
+	}
+	if cov.Bytes != 190 {
+		t.Errorf("Bytes = %d, want 190", cov.Bytes)
+	}
+}
+
+func TestWindowedScanner_SourceErrorOnHeadPeekIsNotEOF(t *testing.T) {
+	// Targets the head peek: 100 bytes is exactly one full window (capacity
+	// 100, tail empty), so the source only errors when ScanStream tries to
+	// read the *next* window's leading byte. A stream that failed there must
+	// not be folded into "the stream ended" — that would leave callers
+	// unable to tell a broken source from a clean one.
+	sentinel := errors.New("disk read failed")
+	fake := &recordingScanner{}
+	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 10000}
+
+	src := &failingReader{data: seq(100), err: sentinel}
+	_, cov, err := w.ScanStream(context.Background(), src)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want %v", err, sentinel)
+	}
+	if cov != (Coverage{}) {
+		t.Errorf("Coverage = %+v, want zero: a broken source covered nothing it can vouch for", cov)
+	}
+	if len(fake.windows) != 1 {
+		t.Errorf("got %d windows, want 1: the second window's head peek should have failed before any Scan call", len(fake.windows))
+	}
+}
+
+func TestWindowedScanner_SourceErrorOnCompletionProbeIsNotComplete(t *testing.T) {
+	// Targets the completion probe: 190 bytes at a budget of 190 empties
+	// bounded.N exactly when the source also runs out (same geometry as
+	// BudgetExactlyEqualToStream), so the loop exits cleanly via bounded's
+	// own io.EOF and complete() has to probe r directly. That probe hits
+	// the source's error, which must read as "not complete", not "complete".
+	sentinel := errors.New("disk read failed")
+	fake := &recordingScanner{}
+	w := WindowedScanner{Scanner: fake, WindowSize: 100, Overlap: 10, Budget: 190}
+
+	src := &failingReader{data: seq(190), err: sentinel}
+	_, cov, err := w.ScanStream(context.Background(), src)
+	if err != nil {
+		t.Fatalf("ScanStream: %v", err)
+	}
+	if cov.Complete {
+		t.Error("Complete = true, want false: the completion probe hit a real error, not EOF")
 	}
 	if cov.Bytes != 190 {
 		t.Errorf("Bytes = %d, want 190", cov.Bytes)
