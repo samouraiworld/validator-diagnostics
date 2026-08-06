@@ -177,7 +177,7 @@ func TestScanLogWindow_OverlongLineMarksTruncated(t *testing.T) {
 		"2026-07-09T19:00:00Z ran past the end of the window",
 	)
 
-	window := scanLogWindow(logGz, cfg, maxLogScanBytes)
+	window := scanLogWindow(logGz, cfg, maxLogWindowBytes)
 	if !window.Truncated {
 		t.Fatalf("window = %+v, want Truncated (an over-long line ended the scan early)", window)
 	}
@@ -196,7 +196,7 @@ func TestScanLogWindow_UsesEarliestAndLatestTimestamps(t *testing.T) {
 		"2026-07-08T17:00:00Z and this one is earliest but comes last",
 	)
 
-	window := scanLogWindow(logGz, cfg, maxLogScanBytes)
+	window := scanLogWindow(logGz, cfg, maxLogWindowBytes)
 	if want := time.Date(2026, 7, 8, 17, 0, 0, 0, time.UTC); !window.FirstSeen.Equal(want) {
 		t.Errorf("FirstSeen = %v, want %v (the earliest timestamp, not the first line)", window.FirstSeen, want)
 	}

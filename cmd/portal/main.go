@@ -80,10 +80,9 @@ const defaultMaxUploadSize = 2147483647 // 2 GiB - 1, libclamav's hard scan ceil
 //
 // The entry is streamed and never buffered (see submission.ValidateArchive
 // and submission.OpenLog), so this bounds *compressed* bytes read out of
-// the archive rather than resident memory. The separate bound on
-// *decompressed* bytes is scoring.maxLogScanBytes (1 GiB), which is what
-// stops a small upload from expanding without limit during the
-// log-window scan.
+// the archive rather than resident memory. Two separate bounds apply to the
+// *decompressed* bytes: scoring.maxLogWindowBytes (1 GiB) for the log-window
+// scan, and -av-scan-budget (32 GiB) for the antivirus.
 //
 // 256 MiB is roughly 2.5x the largest real submission seen so far. Raise it
 // with -max-log-size (MAX_LOG_SIZE in .env) if real submissions bump into

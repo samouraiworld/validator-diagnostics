@@ -67,7 +67,7 @@ type LogWindowCheck struct {
 	Covered bool `json:"covered"`
 
 	// Truncated is true when scanLogWindow stopped early for its own
-	// reasons — the decompression budget (maxLogScanBytes) ran out, or a
+	// reasons — the decompression budget (maxLogWindowBytes) ran out, or a
 	// single line exceeded maxLogLineBytes — rather than because the log
 	// ended. Everything past that point is unread, so the end of the
 	// window is unverifiable and Covered is false.

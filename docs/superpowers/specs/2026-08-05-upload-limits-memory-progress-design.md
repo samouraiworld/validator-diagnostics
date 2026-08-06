@@ -56,7 +56,7 @@ MAX_LOG_SIZE=268435456
 
 `MAX_UPLOAD_SIZE` keeps the current 2 GiB value. `MAX_LOG_SIZE` is **raised
 from 64 MiB to 256 MiB**: ~2.5x headroom over the real 101 MB test archive,
-while staying well under `scoring.maxLogScanBytes` (1 GiB of *decompressed*
+while staying well under `scoring.maxLogWindowBytes` (1 GiB of *decompressed*
 plaintext), which is the separate inner bound on the log-window scan.
 
 ### `docker-compose.yml`
@@ -79,10 +79,10 @@ Its doc comment needs a full rewrite, not a value bump. It currently justifies
 the 64 MiB figure on memory grounds ("these bytes are held in memory for the
 whole request", "far more than the 8 MiB `scoring.scanLogWindow` will ever
 decompress") and both halves of that are wrong after this spec: section 2
-removes the buffering entirely, and `scoring.maxLogScanBytes` is `1 << 30`
+removes the buffering entirely, and `scoring.maxLogWindowBytes` is `1 << 30`
 (1 GiB), not 8 MiB. The replacement comment states what the cap actually does
 now — bound the *compressed* bytes streamed out of the archive, with
-`maxLogScanBytes` as the separate bound on *decompressed* bytes read during
+`maxLogWindowBytes` as the separate bound on *decompressed* bytes read during
 the scan. The `-max-log-size` flag's usage string loses "these bytes are held
 in memory for the whole request" for the same reason.
 
@@ -251,7 +251,7 @@ to check before changing it:
 2. **`clamd.conf`** — `StreamMaxLength`, `MaxFileSize`, and `MaxScanSize` are
    all `2G`. The AV step fails closed (503), so exceeding these produces
    "antivirus unavailable" rather than a clear size error.
-3. **`scoring.maxLogScanBytes`** — 1 GiB of *decompressed* plaintext. A
+3. **`scoring.maxLogWindowBytes`** — 1 GiB of *decompressed* plaintext. A
    multi-GiB compressed log decompresses well past it, so the window scan
    stops early and reports `Truncated`, costing partial credit on
    `LogQualityScore`. This degrades quietly: the submission succeeds, the

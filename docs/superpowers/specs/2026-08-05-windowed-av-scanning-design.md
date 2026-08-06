@@ -352,7 +352,7 @@ either direction: at 1 GiB the AV scan would cover almost nothing of a large
 archive, and at 32 GiB the log-window scan would spend minutes of CPU
 decompressing to find timestamps the first and last lines already give.
 
-- `scoring.maxLogScanBytes` is renamed **`maxLogWindowBytes`**. "Scan" becomes
+- `scoring.maxLogWindowBytes` is renamed **`maxLogWindowBytes`**. "Scan" becomes
   the antivirus's word; the scoring constant is named for what it bounds — the
   investigation-window read — and exceeding it costs partial credit via
   `LogWindowCheck.Truncated`, not a rejection.
@@ -387,7 +387,7 @@ The rename is mechanical but wider than `scoring/checks.go`. Every site:
   disk/S3/time question, with `storage.S3Store.Save`'s single `PutObject` (5 GiB
   S3 limit) as the first thing to move.
 - **`cmd/portal/main.go`'s `defaultMaxLogSize` comment** points at
-  `scoring.maxLogScanBytes` by name; it follows the rename and gains the AV
+  `scoring.maxLogWindowBytes` by name; it follows the rename and gains the AV
   budget as the other decompressed bound.
 - **`.env.example`'s `MAX_UPLOAD_SIZE` and `MAX_LOG_SIZE` comments** both warn
   that clamd's per-file ceiling binds first — `MAX_LOG_SIZE`'s says a compressed
