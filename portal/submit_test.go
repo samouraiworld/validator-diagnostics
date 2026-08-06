@@ -521,6 +521,39 @@ func TestSubmitHandler_RecordsLogOnSuccess(t *testing.T) {
 	}
 }
 
+// TestSubmitHandler_RecordsSentryEnabledFromMetadata is the regression
+// test for Entry.SentryEnabled: nothing else in the suite submits an
+// archive and then reads that field back, so deleting its assignment in
+// ServeHTTP left every other test green while summary.go's "ℹ️ no
+// sentry.log.gz submitted (sentry_enabled is true)" line would never
+// fire for anyone in production.
+func TestSubmitHandler_RecordsSentryEnabledFromMetadata(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+	handler := &SubmitHandler{Sessions: sessions, Store: store, Log: submissionLog}
+
+	// buildArchiveWithLogs's metadata.json always declares
+	// sentry_enabled: true; passing nil for sentryContent submits no
+	// sentry.log.gz, which is exactly the "declared but not sent" case
+	// the summary line exists for.
+	archive := buildArchiveWithLogs(t, operatorAddr.String(), gzipBytes(t, []byte("validator payload")), nil)
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	if len(submissionLog.entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(submissionLog.entries))
+	}
+	if !submissionLog.entries[0].SentryEnabled {
+		t.Error("Entry.SentryEnabled = false, want true: metadata.json declared sentry_enabled true")
+	}
+}
+
 func TestSubmitHandler_DoesNotRecordLogOnFailure(t *testing.T) {
 	operatorAddr := testOperatorAddr()
 	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
@@ -1176,6 +1209,53 @@ func TestSubmitHandler_AcceptsTruncatedLogWithPartialCoverage(t *testing.T) {
 	}
 	if got.Complete {
 		t.Error("Complete = true, want false: the stream broke before the end")
+	}
+}
+
+// TestSubmitHandler_FirstLogIncompleteSecondCompleteStaysIncomplete is the
+// regression test for scanArchive's Complete aggregation
+// (coverage.Complete = coverage.Complete && c.Complete). The only other
+// multi-entry AV test in this file (ScanBudgetIsSharedAcrossBothLogs) has
+// the *second* log skipped outright, so an aggregation that just took the
+// last result (coverage.Complete = c.Complete) would be indistinguishable
+// from the correct AND — both leave Complete false when the second log
+// never scans at all. Here the first log (validator) is truncated and the
+// second (sentry) scans cleanly to completion, so only the AND form
+// reports the archive's overall coverage as incomplete.
+func TestSubmitHandler_FirstLogIncompleteSecondCompleteStaysIncomplete(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		Log:       submissionLog,
+		AVScanner: &capturingScanner{},
+	}
+
+	// The validator log's gzip stream is cut short mid-body, exactly as in
+	// AcceptsTruncatedLogWithPartialCoverage above; the sentry log is a
+	// small, intact stream that scans to completion under the default
+	// budget.
+	full := gzipBytes(t, []byte("a log that was being written when the disk filled up"))
+	truncatedValidator := full[:len(full)-8]
+	intactSentry := gzipBytes(t, []byte("small intact sentry log"))
+	archive := buildArchiveWithLogs(t, operatorAddr.String(), truncatedValidator, intactSentry)
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: what could be read was read", status)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a partial coverage claim")
+	}
+	if got.Complete {
+		t.Error("Complete = true, want false: the first log's stream broke, and one incomplete log must settle it for the whole archive")
 	}
 }
 

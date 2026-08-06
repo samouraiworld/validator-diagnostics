@@ -87,7 +87,7 @@
       <li><code>metadata.json</code> — validator and environment metadata; schema and example below. Unknown fields are rejected.</li>
       <li>Only these files at the top level of the archive — no subfolders, no symlinks, no extra files.</li>
       <li><code>validator_address</code> must match your operator address; <code>moniker</code> must match the archive's filename.</li>
-      <li>Size limits: <code>validator.log.gz</code> and <code>sentry.log.gz</code> ≤ 256 MiB each, <code>metadata.json</code> ≤ 64 KiB, total upload ≤ 2 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.</li>
+      <li>Size limits: <code>validator.log.gz</code> and <code>sentry.log.gz</code> ≤ 4 GiB each, <code>metadata.json</code> ≤ 64 KiB, total upload ≤ 4 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.</li>
     </ul>
     <p>Example <code>metadata.json</code>:</p>
     <pre>{

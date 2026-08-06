@@ -89,8 +89,9 @@ func AdminScoreHandler(log *FileLog, scores *scoring.Store) http.HandlerFunc {
 		// A manual score completes an automatic half; it doesn't stand in
 		// for one. A submission recorded before the exercise was
 		// configured has no automatic half and can never acquire one —
-		// AutoChecks needs the log bytes, which aren't retained past the
-		// request. Writing the manual field onto it would clear
+		// scoring.MetadataChecks and scoring.ScanLogWindow (driven from
+		// portal.autoChecks) need the log bytes, which aren't retained
+		// past the request. Writing the manual field onto it would clear
 		// Pending() while the automatic scores stayed at zero, publishing
 		// a total that reads as final and means nothing.
 		if !ok || !result.Scored {

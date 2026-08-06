@@ -27,7 +27,7 @@ type Result struct {
 	// before this existed, which reads as "no sentry log": what those
 	// submissions in fact had.
 	SentryLogPresent bool           `json:"sentry_log_present,omitempty"`
-	SentryLogWindow  LogWindowCheck `json:"sentry_log_window,omitempty"`
+	SentryLogWindow  LogWindowCheck `json:"sentry_log_window"`
 
 	UploadTimeScore int `json:"upload_time_score"`
 	MetadataScore   int `json:"metadata_score"`

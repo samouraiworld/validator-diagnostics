@@ -4,7 +4,11 @@
 // (genesis hash, gnoland version, log time window) that feed part of
 // it. See docs/superpowers/specs/2026-08-03-fire-drill-phase3-design.md
 // and docs/superpowers/specs/2026-08-04-merge-ack-upload-scoring-design.md
-// for the full design and the rationale behind each formula below.
+// for the full design and the rationale behind each formula below, and
+// docs/superpowers/specs/2026-08-06-sentry-log-scoring-design.md for the
+// sentry-log split, which supersedes the log-quality parts (the
+// LogQualityScore breakdown and the 13/+12/+6 figures) of those two
+// earlier documents.
 package scoring
 
 import (

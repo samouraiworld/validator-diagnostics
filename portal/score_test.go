@@ -220,7 +220,8 @@ func TestAdminScoreHandler_RejectsUnknownID(t *testing.T) {
 
 func TestAdminScoreHandler_RejectsSubmissionThatWasNeverAutoScored(t *testing.T) {
 	// A submission that arrived before the exercise was configured has no
-	// automatic half and can never get one — AutoChecks needs the log
+	// automatic half and can never get one — scoring.MetadataChecks and
+	// scoring.ScanLogWindow (driven from portal.autoChecks) need the log
 	// bytes, which aren't retained. Accepting a manual score for it
 	// produces a record that reads as complete (Pending false) while
 	// carrying none of the automatic points, i.e. a "final" 5/100 that
