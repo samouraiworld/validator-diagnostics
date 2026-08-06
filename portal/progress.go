@@ -25,14 +25,20 @@ const (
 	PhaseScoring    Phase = "scoring"
 )
 
-// progressTTL bounds how long an entry survives without an update. Done runs
-// from a defer and covers every normal exit including a panic, so this only
-// catches a handler goroutine killed outright.
+// progressTTL bounds how long a stale entry is still reported, not how long
+// it survives: Get evicts only the key it was asked about, and nothing
+// sweeps the map on its own, so an entry left behind by a handler goroutine
+// killed outright (Done never runs) sits there — just no longer served —
+// until that same operator's next poll asks for it, however much later that
+// is. That is fine rather than a leak worth adding a sweep for: the map is
+// bounded by the number of distinct authenticated operators with a
+// submission in flight, at roughly 100 bytes an entry, not by anything an
+// attacker can grow.
 //
 // Five minutes rather than something tighter because the validating phase
 // reports nothing while it runs and can legitimately be silent for a minute
-// on a large archive. The scanning phase, by contrast, updates every window —
-// roughly every seven seconds.
+// on a large archive. The scanning and storing phases, by contrast, update on
+// every Read — roughly once per megabyte, far more often than that.
 const progressTTL = 5 * time.Minute
 
 // Progress is one in-flight submission's server-side state, as served by

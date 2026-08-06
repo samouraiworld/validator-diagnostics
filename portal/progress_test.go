@@ -239,7 +239,7 @@ func TestProgressTracker_StaleEntryIsReportedAbsent(t *testing.T) {
 }
 
 func TestProgressTracker_StalenessIsRefreshedByUpdates(t *testing.T) {
-	// A scan updates every window, roughly every seven seconds, so a long
+	// A scan updates on every Read, roughly once per megabyte, so a long
 	// scan must never be mistaken for an abandoned one.
 	tracker := NewProgressTracker()
 	now := time.Now()
