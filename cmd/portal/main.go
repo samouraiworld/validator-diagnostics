@@ -254,11 +254,11 @@ func submitHandlerFor(d muxDeps) *portal.SubmitHandler {
 		Store:         d.Store,
 		Log:           d.SubmissionLog,
 		AVScanner:     d.AVScanner,
+		Progress:      d.ProgressTracker,
 		AVScanBudget:  d.AVScanBudget,
 		Exercise:      d.ExerciseStore,
 		Scores:        d.ScoresStore,
 		MaxUploadSize: d.MaxUploadSize,
-		Progress:      d.ProgressTracker,
 
 		ArchiveOptions: d.ArchiveOptions,
 	}
