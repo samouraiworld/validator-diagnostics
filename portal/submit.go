@@ -197,13 +197,13 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		verdict, coverage, err := scanArchive(r.Context(), file, h.ArchiveOptions, archiveResult.Metadata, scanner, h.AVScanBudget)
 		switch {
 		case errors.Is(err, errUnreadableLog):
-			// ValidateArchive only checked this entry's two magic bytes,
-			// so a log that cannot be decompressed at all gets this far.
-			// Nothing in it was ever readable, so nothing in it can be
+			// ValidateArchive only checked each log entry's two magic
+			// bytes, so a log that cannot be decompressed at all gets this
+			// far. Nothing in it was ever readable, so nothing in it can be
 			// scanned, and storing it would be exactly the fail-open the
 			// AV step exists to prevent.
 			writeSubmitResult(w, http.StatusBadRequest, submitResponse{
-				Error: fmt.Sprintf("%s could not be decompressed, so it could not be scanned: %v", submission.ValidatorLogFileName, err),
+				Error: fmt.Sprintf("a log entry could not be decompressed, so it could not be scanned: %v", err),
 			})
 			return
 		case err != nil:
@@ -389,26 +389,39 @@ func autoChecks(ctx context.Context, file io.ReadSeeker, opts submission.Options
 	return genesisMatch, versionSupported, windows, nil
 }
 
-// errUnreadableLog marks a gnoland.log.gz whose gzip stream could not be
-// opened at all. It is distinct from a scanner failure because the two are
-// answered differently: this is the submitter's problem (400), a scanner
-// failure is ours (503).
+// errUnreadableLog marks a log entry whose gzip stream could not be
+// opened at all. It is distinct from a scanner failure because the two
+// are answered differently: this is the submitter's problem (400), a
+// scanner failure is ours (503). It applies to the optional sentry log
+// as much as the required validator log — an entry that is stored
+// without ever being scanned is the fail-open the AV step exists to
+// prevent, whether or not the entry had to be there.
 var errUnreadableLog = errors.New("not a readable gzip stream")
 
+// errInfected stops the ScanLogs walk on the first infected verdict.
+// Internal to scanArchive: the verdict itself travels in a variable, not
+// in the error.
+var errInfected = errors.New("infected")
+
 // scanArchive submits the archive's extracted content to scanner: first
-// metadata.json, already in memory and small enough to scan whole, then the
-// decompressed log in windows under budget.
+// metadata.json, already in memory and small enough to scan whole, then
+// each decompressed log in windows, all sharing one budget.
 //
 // clamd never sees the raw .tar.gz. libclamav refuses to scan any single
-// file of 2 GiB or more, and that ceiling applies to every file it extracts
-// — including the decompressed log — so the archive is taken apart here
-// instead, which is also what prd.md asks for ("Run an antivirus scan on
-// extracted content").
+// file of 2 GiB or more, and that ceiling applies to every file it
+// extracts — including the decompressed logs — so the archive is taken
+// apart here instead, which is also what prd.md asks for ("Run an
+// antivirus scan on extracted content").
 //
-// file must be the already-validated upload; it is rewound first, so callers
-// must not rely on its offset afterwards. This is a function rather than an
-// inline block so the log stream is closed as soon as the scan ends rather
-// than at the end of the whole request.
+// budget is per submission, not per log: it bounds how much decompressed
+// content one submission may cost the antivirus, and giving each entry
+// its own copy would silently double that ceiling. A log reached with
+// nothing left is not scanned, not counted, and forces incomplete
+// coverage — never scanned under a fresh budget, which is what handing
+// WindowedScanner a non-positive Budget would quietly do.
+//
+// file must be the already-validated upload; it is rewound first, so
+// callers must not rely on its offset afterwards.
 func scanArchive(ctx context.Context, file io.ReadSeeker, opts submission.Options, metadata []byte, scanner clamav.Scanner, budget int64) (clamav.Verdict, clamav.Coverage, error) {
 	verdict, err := scanner.Scan(ctx, bytes.NewReader(metadata))
 	if err != nil {
@@ -421,19 +434,53 @@ func scanArchive(ctx context.Context, file io.ReadSeeker, opts submission.Option
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return clamav.Verdict{}, clamav.Coverage{}, fmt.Errorf("rewinding upload: %w", err)
 	}
-	logGz, err := submission.OpenLog(ctx, file, opts)
-	if err != nil {
+
+	if budget <= 0 {
+		budget = clamav.DefaultScanBudget
+	}
+	remaining := budget
+
+	// Complete starts true and is only ever cleared: it is an assertion
+	// about every log, so one incomplete entry settles it for the archive.
+	coverage := clamav.Coverage{Complete: true}
+	var infected clamav.Verdict
+
+	err = submission.ScanLogs(ctx, file, opts, func(name string, logGz io.Reader) error {
+		if remaining <= 0 {
+			coverage.Complete = false
+			return nil
+		}
+
+		gz, err := gzip.NewReader(logGz)
+		if err != nil {
+			return fmt.Errorf("%w: %s: %v", errUnreadableLog, name, err)
+		}
+		defer gz.Close()
+
+		v, c, err := clamav.WindowedScanner{Scanner: scanner, Budget: remaining}.ScanStream(ctx, gz)
+		if err != nil {
+			return err
+		}
+
+		coverage.Bytes += c.Bytes
+		coverage.Complete = coverage.Complete && c.Complete
+		remaining -= c.Bytes
+
+		if v.Infected {
+			infected = v
+			return errInfected
+		}
+		return nil
+	})
+
+	switch {
+	case errors.Is(err, errInfected):
+		return infected, coverage, nil
+	case err != nil:
 		return clamav.Verdict{}, clamav.Coverage{}, err
 	}
-	defer logGz.Close()
 
-	gz, err := gzip.NewReader(logGz)
-	if err != nil {
-		return clamav.Verdict{}, clamav.Coverage{}, fmt.Errorf("%w: %v", errUnreadableLog, err)
-	}
-	defer gz.Close()
-
-	return clamav.WindowedScanner{Scanner: scanner, Budget: budget}.ScanStream(ctx, gz)
+	return clamav.Verdict{}, coverage, nil
 }
 
 // avScanBudget is the effective budget, for logging: WindowedScanner applies

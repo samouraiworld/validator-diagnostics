@@ -917,6 +917,134 @@ func (s *capturingScanner) captured() [][]byte {
 	return s.streams
 }
 
+// avHandler wires a handler whose only job is the antivirus path, with
+// the scanner and log the assertions read back.
+func avHandler(t *testing.T, scanner clamav.Scanner, budget int64) (*SubmitHandler, *auth.SessionSigner, *fakeLog, *fakeStore) {
+	t.Helper()
+
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	submissionLog := &fakeLog{}
+	store := newFakeStore()
+
+	return &SubmitHandler{
+		Sessions:     sessions,
+		Store:        store,
+		Log:          submissionLog,
+		AVScanner:    scanner,
+		AVScanBudget: budget,
+	}, sessions, submissionLog, store
+}
+
+func TestSubmitHandler_ScansTheSentryLogToo(t *testing.T) {
+	scanner := &capturingScanner{}
+	handler, sessions, submissionLog, _ := avHandler(t, scanner, 0)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, []byte("validator payload")),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	streams := scanner.captured()
+	if len(streams) != 3 {
+		t.Fatalf("got %d scans, want 3 (metadata.json, then each log)", len(streams))
+	}
+	if string(streams[1]) != "validator payload" {
+		t.Errorf("second scan = %q, want the decompressed validator log", streams[1])
+	}
+	if string(streams[2]) != "sentry payload" {
+		t.Errorf("third scan = %q, want the decompressed sentry log — an unscanned entry must never be stored", streams[2])
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a coverage claim")
+	}
+	want := int64(len("validator payload") + len("sentry payload"))
+	if !got.Complete || got.Bytes != want {
+		t.Errorf("Scan = %+v, want complete coverage of %d bytes across both logs", *got, want)
+	}
+}
+
+func TestSubmitHandler_RejectsInfectedSentryLog(t *testing.T) {
+	// Clean for metadata.json and the validator log, infected on the
+	// third stream — the sentry log.
+	scanner := &capturingScanner{verdicts: []clamav.Verdict{
+		{},
+		{},
+		{Infected: true, Signature: "Test.Sentry"},
+	}}
+	handler, sessions, _, store := avHandler(t, scanner, 0)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, []byte("validator payload")),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("an archive with an infected sentry log was stored")
+	}
+}
+
+func TestSubmitHandler_RejectsUnreadableSentryLogGzip(t *testing.T) {
+	handler, sessions, _, store := avHandler(t, &capturingScanner{}, 0)
+	addr := testOperatorAddr()
+
+	// The right magic bytes over a header that is not a gzip header:
+	// ValidateArchive accepts it, and nothing beyond it can ever be read.
+	broken := append([]byte{0x1f, 0x8b}, []byte("not really a gzip header at all")...)
+	archive := buildArchiveWithLogs(t, addr.String(), gzipBytes(t, []byte("validator payload")), broken)
+
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: an optional entry nothing can read is still an entry nothing can scan", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("the archive was stored despite carrying an entirely unscanned entry")
+	}
+}
+
+func TestSubmitHandler_ScanBudgetIsSharedAcrossBothLogs(t *testing.T) {
+	// A budget smaller than the validator log alone. The sentry log must
+	// then go unscanned and coverage must say so — it must NOT be scanned
+	// under a silently restored full budget, which is what handing
+	// WindowedScanner a non-positive Budget would quietly do.
+	scanner := &capturingScanner{}
+	handler, sessions, submissionLog, _ := avHandler(t, scanner, 512)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, bytes.Repeat([]byte("x"), 4096)),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an exhausted budget is recorded, not rejected)", status)
+	}
+
+	for _, chunk := range scanner.captured() {
+		if bytes.Contains(chunk, []byte("sentry payload")) {
+			t.Error("the sentry log was scanned after the budget was already spent")
+		}
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a coverage claim")
+	}
+	if got.Complete {
+		t.Error("Scan.Complete = true, want false when a log went unscanned for want of budget")
+	}
+}
+
 func TestSubmitHandler_ScansExtractedContentNotTheArchive(t *testing.T) {
 	operatorAddr := testOperatorAddr()
 	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
