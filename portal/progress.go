@@ -1,12 +1,15 @@
 package portal
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/samourai/validator-diagnostics/auth"
+	"github.com/samourai/validator-diagnostics/clamav"
 )
 
 // Phase names the server-side stage a submission has reached. The transfer
@@ -245,4 +248,39 @@ func ProgressHandler(sessions *auth.SessionSigner, tracker *ProgressTracker) htt
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(progress)
 	}
+}
+
+// countingScanner reports how much of each window reaches the wrapped
+// Scanner, so a scan in progress can be shown advancing rather than as a
+// frozen bar. It exists here rather than in the clamav package because
+// counting is this package's concern: clamav.WindowedScanner's contract is
+// unchanged by it.
+//
+// It counts bytes streamed to the antivirus, which includes the 1 MiB
+// re-sent at each window boundary — roughly 0.1% more than the Coverage the
+// submission finally records. That skew is deliberate: this is a liveness
+// indicator, and Coverage.Bytes remains the authoritative number, both on the
+// log entry and on the dashboard badge.
+type countingScanner struct {
+	inner clamav.Scanner
+	add   func(int64)
+}
+
+func (s countingScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, error) {
+	return s.inner.Scan(ctx, &countingReader{r: r, add: s.add})
+}
+
+// countingReader reports bytes as they are read, for phases whose progress is
+// otherwise invisible from outside.
+type countingReader struct {
+	r   io.Reader
+	add func(int64)
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.add(int64(n))
+	}
+	return n, err
 }

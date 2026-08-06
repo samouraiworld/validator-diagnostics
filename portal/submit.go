@@ -85,6 +85,11 @@ type SubmitHandler struct {
 	// submitted to the scanner. Zero uses clamav.DefaultScanBudget.
 	// Exceeding it is recorded as partial coverage, never a rejection.
 	AVScanBudget int64
+
+	// Progress publishes server-side progress for the upload page to poll
+	// (see ProgressHandler). Optional — a nil Progress disables reporting
+	// and changes nothing else about how a submission is handled.
+	Progress *ProgressTracker
 }
 
 type submitResponse struct {
@@ -126,6 +131,14 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.MultipartForm.RemoveAll()
 
+	// Tracking starts here, not earlier: everything before this was reading
+	// the request body, which the browser already observes through its own
+	// upload progress events. The page polls from the moment its last byte
+	// leaves, so it will see 404s until this line runs — which is correct,
+	// and which it treats as "not yet".
+	progress := h.Progress.Begin(operatorAddr.String())
+	defer progress.Done()
+
 	file, header, err := r.FormFile("archive")
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: `missing "archive" file field`})
@@ -143,6 +156,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// in memory or spilled it to a temp file above — so ValidateArchive,
 	// the AV scan, and Store.Save can each take their own full pass
 	// over it without us buffering a second copy ourselves.
+	progress.Phase(PhaseValidating, 0)
 	archiveResult, err := submission.ValidateArchive(r.Context(), file, h.ArchiveOptions)
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: err.Error()})
@@ -176,7 +190,11 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var scanCoverage *clamav.Coverage
 
 	if h.AVScanner != nil {
-		verdict, coverage, err := scanArchive(r.Context(), file, h.ArchiveOptions, archiveResult.Metadata, h.AVScanner, h.AVScanBudget)
+		progress.Phase(PhaseScanning, 0)
+		// Always wrapped: Add on a nil handle is a no-op, so this needs no
+		// guard for a handler built without a tracker.
+		scanner := countingScanner{inner: h.AVScanner, add: progress.Add}
+		verdict, coverage, err := scanArchive(r.Context(), file, h.ArchiveOptions, archiveResult.Metadata, scanner, h.AVScanBudget)
 		switch {
 		case errors.Is(err, errUnreadableLog):
 			// ValidateArchive only checked this entry's two magic bytes,
@@ -222,7 +240,8 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.Save(r.Context(), header.Filename, file, header.Size); err != nil {
+	progress.Phase(PhaseStoring, header.Size)
+	if err := h.Store.Save(r.Context(), header.Filename, &countingReader{r: file, add: progress.Add}, header.Size); err != nil {
 		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to store archive"})
 		return
 	}
@@ -236,6 +255,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	recordedAt := time.Now().UTC()
 
 	if h.Exercise != nil {
+		progress.Phase(PhaseScoring, 0)
 		cfg, err := h.Exercise.Get()
 		if err != nil {
 			log.Printf("scoring: unable to read exercise config for %s: %v", header.Filename, err)

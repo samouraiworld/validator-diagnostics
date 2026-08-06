@@ -899,3 +899,117 @@ func TestSubmitHandler_ScannerFailureOnTheLogIs503(t *testing.T) {
 		t.Error("an unscanned archive was stored")
 	}
 }
+
+// blockingScanner lets a test observe the handler *during* the scan. Without
+// it every assertion about progress would run after the handler returned, by
+// which point the deferred Done has already removed the entry — and a test
+// that passes against a handler publishing nothing at all proves nothing.
+type blockingScanner struct {
+	mu       sync.Mutex
+	calls    int
+	scanning chan struct{} // closed once the log's window is being scanned
+	release  chan struct{} // closed by the test to let the handler finish
+}
+
+func (s *blockingScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, error) {
+	if _, err := io.ReadAll(r); err != nil {
+		return clamav.Verdict{}, err
+	}
+
+	s.mu.Lock()
+	s.calls++
+	n := s.calls
+	s.mu.Unlock()
+
+	// Call 1 is metadata.json; call 2 is the log's only window, which is the
+	// phase this test is about.
+	if n == 2 {
+		close(s.scanning)
+		<-s.release
+	}
+	return clamav.Verdict{}, nil
+}
+
+func TestSubmitHandler_PublishesProgressWhileScanning(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	tracker := NewProgressTracker()
+	scanner := &blockingScanner{scanning: make(chan struct{}), release: make(chan struct{})}
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     newFakeStore(),
+		AVScanner: scanner,
+		Progress:  tracker,
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// Built here, not in the goroutine below: these helpers call t.Fatalf,
+	// which is only valid on the test's own goroutine.
+	body, contentType := multipartUpload(t, "samourai-20260709-1830UTC.tar.gz", buildValidArchive(t, operatorAddr.String()))
+	token := sessions.Issue(operatorAddr)
+
+	status := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, srv.URL, body)
+		if err != nil {
+			status <- 0
+			return
+		}
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		status <- resp.StatusCode
+	}()
+
+	select {
+	case <-scanner.scanning:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the log scan never started")
+	}
+
+	got, ok := tracker.Get(operatorAddr.String())
+	if !ok {
+		t.Fatal("no progress published while the scan was running")
+	}
+	if got.Phase != PhaseScanning {
+		t.Errorf("Phase = %q, want %q", got.Phase, PhaseScanning)
+	}
+	if got.Bytes == 0 {
+		t.Error("Bytes = 0 mid-scan, want the bytes already streamed to the scanner")
+	}
+
+	close(scanner.release)
+	if code := <-status; code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if _, ok := tracker.Get(operatorAddr.String()); ok {
+		t.Error("progress outlived the handler; the deferred Done must remove it")
+	}
+}
+
+func TestSubmitHandler_WithoutATrackerBehavesAsBefore(t *testing.T) {
+	// cmd/portal-dev builds the handler this way, and so does every other
+	// test in this file. A nil tracker must be a no-op, not a panic.
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     newFakeStore(),
+		AVScanner: &capturingScanner{},
+		// Progress deliberately nil.
+	}
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, buildValidArchive(t, operatorAddr.String())); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+}
