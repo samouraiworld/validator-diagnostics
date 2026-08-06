@@ -1,6 +1,6 @@
 // Package submission validates fire-drill archive submissions against
 // the rules in prd.md: the "<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz" naming
-// convention, the "gnoland.log.gz" + "metadata.json" archive structure,
+// convention, the "validator.log.gz" + "metadata.json" archive structure,
 // and the hardening rules under "Security Considerations" (no path
 // traversal, no symlinks, no unexpected entries, bounded decompression).
 //

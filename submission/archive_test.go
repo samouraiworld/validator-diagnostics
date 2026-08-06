@@ -57,7 +57,7 @@ func buildTarGz(t *testing.T, entries []tarEntry) []byte {
 }
 
 // validLogContent starts with the gzip magic bytes, as a real
-// gnoland.log.gz would (it's itself gzip-compressed log content, nested
+// validator.log.gz would (it's itself gzip-compressed log content, nested
 // inside the outer tar.gz).
 var validLogContent = append([]byte{0x1f, 0x8b}, []byte("fake gzip log payload")...)
 
@@ -174,7 +174,7 @@ func TestValidateArchive_RejectsMissingEntry(t *testing.T) {
 	})
 
 	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
-		t.Fatal("expected an archive missing gnoland.log.gz to be rejected, got nil")
+		t.Fatal("expected an archive missing validator.log.gz to be rejected, got nil")
 	}
 }
 
@@ -198,7 +198,7 @@ func TestValidateArchive_RejectsOversizedLogEntry(t *testing.T) {
 
 	_, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{MaxLogSize: 4})
 	if err == nil {
-		t.Fatal("expected an oversized gnoland.log.gz to be rejected, got nil")
+		t.Fatal("expected an oversized validator.log.gz to be rejected, got nil")
 	}
 }
 
@@ -224,7 +224,7 @@ func TestValidateArchive_RejectsBadLogMagicBytes(t *testing.T) {
 	})
 
 	if _, err := ValidateArchive(context.Background(), bytes.NewReader(data), Options{}); err == nil {
-		t.Fatal("expected gnoland.log.gz without gzip magic bytes to be rejected, got nil")
+		t.Fatal("expected validator.log.gz without gzip magic bytes to be rejected, got nil")
 	}
 }
 

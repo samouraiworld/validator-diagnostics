@@ -13,12 +13,13 @@ import (
 )
 
 // maxLogWindowBytes bounds how much *decompressed* plaintext scanLogWindow
-// will read out of gnoland.log.gz, independent of the compressed-size cap
-// submission.ValidateArchive enforces and submission.OpenLog re-applies, and
+// will read out of one submitted log, independent of the compressed-size cap
+// submission.ValidateArchive enforces and submission.ScanLogs re-applies, and
 // independent of the antivirus's own decompressed budget
-// (clamav.DefaultScanBudget, 32 GiB). Two budgets over the same bytes, for
-// unrelated reasons: exceeding this one costs partial credit via
-// LogWindowCheck.Truncated, exceeding the antivirus's costs coverage.
+// (clamav.DefaultScanBudget, 32 GiB, shared across both logs). Two budgets
+// over the same bytes, for unrelated reasons: exceeding this one costs
+// partial credit via LogWindowCheck.Truncated, exceeding the antivirus's
+// costs coverage.
 //
 // It is set well above a plausible validator log rather than at the
 // smallest workable value, because the budget running out is not a free

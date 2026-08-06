@@ -81,7 +81,7 @@ type SubmitHandler struct {
 	// defaultMaxUploadSize.
 	MaxUploadSize int64
 
-	// AVScanBudget caps how many decompressed bytes of gnoland.log.gz are
+	// AVScanBudget caps how many decompressed bytes of log content are
 	// submitted to the scanner. Zero uses clamav.DefaultScanBudget.
 	// Exceeding it is recorded as partial coverage, never a rejection.
 	AVScanBudget int64

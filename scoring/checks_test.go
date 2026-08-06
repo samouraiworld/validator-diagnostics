@@ -206,7 +206,7 @@ func TestScanLogWindow_UsesEarliestAndLatestTimestamps(t *testing.T) {
 }
 
 func TestScanLogWindow_BudgetBoundsDecompression(t *testing.T) {
-	// The bomb defence: gnoland.log.gz's content is itself compressed
+	// The bomb defence: validator.log.gz's content is itself compressed
 	// plaintext that ValidateArchive never decompresses, so this is the
 	// first place decompression happens and the budget is what keeps a
 	// small upload from expanding without limit.

@@ -4,7 +4,7 @@ services:
     volumes:
       - clamav-data:/var/lib/clamav
       # Raises clamd's stock stream limit to comfortably cover one scan
-      # window (metadata.json, or a 1 GiB gnoland.log.gz window plus its
+      # window (metadata.json, or a 1 GiB window of a log entry plus its
       # 1 MiB overlap), and makes it report content it skipped for
       # exceeding a limit instead of answering OK — see the file's own
       # header. Note this replaces the image's config wholesale, so
@@ -93,16 +93,18 @@ services:
       # constant; this file can't import a Go constant, so keep the two
       # numbers in step by hand.
       - -max-upload-size=${MAX_UPLOAD_SIZE:-4294967296}
-      # 4 GiB, matching MAX_UPLOAD_SIZE. Streamed, not buffered — see
-      # submission.ValidateArchive and submission.OpenLog. The ceiling
+      # 4 GiB, matching MAX_UPLOAD_SIZE. Applies per log entry
+      # (validator.log.gz, sentry.log.gz). Streamed, not buffered — see
+      # submission.ValidateArchive and submission.ScanLogs. The ceiling
       # here is decompression work, not resident memory.
       # Source of truth: cmd/portal/main.go's defaultMaxLogSize constant;
       # this file can't import a Go constant, so keep the two numbers in
       # step by hand.
       - -max-log-size=${MAX_LOG_SIZE:-4294967296}
-      # Decompressed bytes of gnoland.log.gz the antivirus may examine.
-      # Past this the submission is accepted and recorded as partially
-      # scanned — the cap is bomb defence, not cost control.
+      # Decompressed bytes of log content the antivirus may examine per
+      # submission, shared across validator.log.gz and sentry.log.gz under
+      # one budget. Past this the submission is accepted and recorded as
+      # partially scanned — the cap is bomb defence, not cost control.
       # Source of truth: clamav.DefaultScanBudget; this file can't import
       # a Go constant, so keep the two numbers in step by hand.
       - -av-scan-budget=${AV_SCAN_BUDGET:-34359738368}
