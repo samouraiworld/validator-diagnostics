@@ -92,6 +92,116 @@ function setUploadProcessing() {
   announcePhase(message);
 }
 
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) {
+    return s + "s";
+  }
+  return Math.floor(s / 60) + "m " + (s % 60) + "s";
+}
+
+// PHASE_SENTENCES is what the validator reads for each server-side phase
+// (portal.Phase). A phase this page does not know about falls back to the
+// generic message rather than rendering a raw identifier.
+const PHASE_SENTENCES = {
+  validating: "Checking the archive's structure.",
+  scanning: "Antivirus scan in progress.",
+  storing: "Storing the archive.",
+  scoring: "Scoring your submission.",
+};
+
+let announcedPhase = null;
+
+// renderServerProgress paints one poll result. The scanning phase gets an
+// indeterminate bar and absolute numbers on purpose: the log's decompressed
+// size is not known until it has been decompressed, so there is no honest
+// denominator, and a bar driven by the budget instead would glide along and
+// then jump to done. Storing is the opposite case — its total is the
+// archive's own size — so it gets a real percentage.
+function renderServerProgress(p) {
+  const bar = document.getElementById("upload-bar");
+  const status = document.getElementById("upload-status");
+  const detail = document.getElementById("upload-detail");
+
+  const sentence = PHASE_SENTENCES[p.phase] || "The server is processing your archive.";
+  let detailText = "";
+
+  if (p.phase === "storing" && p.total > 0) {
+    const pct = Math.round((p.bytes / p.total) * 100);
+    bar.value = pct;
+    detailText = `${formatBytes(p.bytes)} / ${formatBytes(p.total)} (${pct}%)`;
+  } else {
+    bar.removeAttribute("value");
+    if (p.phase === "scanning") {
+      const elapsed = (Date.now() - Date.parse(p.phase_started_at)) / 1000;
+      const rate = elapsed > 0 ? p.bytes / elapsed : 0;
+      detailText =
+        `${formatBytes(p.bytes)} streamed · ${formatDuration(elapsed)} · ${formatBytes(rate)}/s`;
+    }
+  }
+
+  status.textContent = sentence + " Keep this tab open.";
+  detail.textContent = detailText;
+
+  // Announced only when the phase itself changes — the byte count beside it
+  // refreshes every two seconds and must never reach the live region.
+  if (p.phase !== announcedPhase) {
+    announcedPhase = p.phase;
+    announcePhase(sentence);
+  }
+}
+
+let progressTimer = null;
+
+// startProgressPolling opens the second connection this page needs: the
+// submission's own response cannot report progress without freezing its
+// status code, so progress arrives on its own request.
+//
+// Every failure path here returns silently. A 404 is normal — it is the
+// answer until the server finishes reading the request body, and again once
+// it has responded — and a network error on a poll says nothing about the
+// upload, which is being decided on the other connection entirely. If polling
+// never succeeds, the page simply keeps the message setUploadProcessing left.
+function startProgressPolling(token) {
+  stopProgressPolling();
+  announcedPhase = null;
+
+  progressTimer = setInterval(async () => {
+    let resp;
+    try {
+      resp = await fetch("/submit/progress", {
+        headers: { Authorization: "Bearer " + token },
+      });
+    } catch (err) {
+      return;
+    }
+    if (!resp.ok) {
+      return;
+    }
+
+    let p;
+    try {
+      p = await resp.json();
+    } catch (err) {
+      return;
+    }
+
+    // The submission may have completed while this poll was in flight;
+    // painting now would resurrect a panel the load handler just hid.
+    if (progressTimer === null) {
+      return;
+    }
+    renderServerProgress(p);
+  }, 2000);
+}
+
+function stopProgressPolling() {
+  if (progressTimer !== null) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+}
+
 document.getElementById("get-challenge").addEventListener("click", async () => {
   setError("address-error", "");
   const address = document.getElementById("operator-address").value.trim();
@@ -220,9 +330,13 @@ document.getElementById("submit-archive").addEventListener("click", () => {
 
   // Fires when the last byte is handed to the network stack — which is
   // not the same as the server having received and processed it.
-  xhr.upload.addEventListener("load", setUploadProcessing);
+  xhr.upload.addEventListener("load", () => {
+    setUploadProcessing();
+    startProgressPolling(sessionToken);
+  });
 
   xhr.addEventListener("load", () => {
+    stopProgressPolling();
     progress.hidden = true;
     button.disabled = false;
 
@@ -238,9 +352,16 @@ document.getElementById("submit-archive").addEventListener("click", () => {
   });
 
   xhr.addEventListener("error", () => {
+    stopProgressPolling();
     progress.hidden = true;
     button.disabled = false;
     setError("upload-error", "Network error while uploading.");
+  });
+
+  xhr.addEventListener("abort", () => {
+    stopProgressPolling();
+    progress.hidden = true;
+    button.disabled = false;
   });
 
   xhr.send(form);
