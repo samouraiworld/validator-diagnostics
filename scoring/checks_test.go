@@ -35,12 +35,11 @@ func windowTestConfig() exercise.Config {
 	}
 }
 
-func TestAutoChecks_GenesisAndVersionMatch(t *testing.T) {
+func TestMetadataChecks_GenesisAndVersionMatch(t *testing.T) {
 	cfg := windowTestConfig()
 	meta := submission.Metadata{GenesisSHA256: "abc123", GnolandVersion: "v1.0.1"}
-	logGz := gzipLines(t, "2026-07-08T19:00:00Z hello")
 
-	genesisMatch, versionSupported, _ := AutoChecks(meta, logGz, cfg)
+	genesisMatch, versionSupported := MetadataChecks(meta, cfg)
 	if !genesisMatch {
 		t.Error("genesisMatch = false, want true")
 	}
@@ -49,12 +48,11 @@ func TestAutoChecks_GenesisAndVersionMatch(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_GenesisAndVersionMismatch(t *testing.T) {
+func TestMetadataChecks_GenesisAndVersionMismatch(t *testing.T) {
 	cfg := windowTestConfig()
 	meta := submission.Metadata{GenesisSHA256: "wrong-hash", GnolandVersion: "v9.9.9"}
-	logGz := gzipLines(t, "2026-07-08T19:00:00Z hello")
 
-	genesisMatch, versionSupported, _ := AutoChecks(meta, logGz, cfg)
+	genesisMatch, versionSupported := MetadataChecks(meta, cfg)
 	if genesisMatch {
 		t.Error("genesisMatch = true, want false")
 	}
@@ -63,7 +61,7 @@ func TestAutoChecks_GenesisAndVersionMismatch(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_GenesisAndVersionToleratePresentation(t *testing.T) {
+func TestMetadataChecks_GenesisAndVersionToleratePresentation(t *testing.T) {
 	// sha256sum emits lowercase, but a hash pasted from a block explorer,
 	// a wiki table or Windows CertUtil is commonly uppercase, and form
 	// fields collect stray whitespace. A hash is the same hash either
@@ -73,10 +71,9 @@ func TestAutoChecks_GenesisAndVersionToleratePresentation(t *testing.T) {
 	cfg := windowTestConfig()
 	cfg.ExpectedGenesisSHA256 = "  ABC123  "
 	cfg.SupportedGnolandVersions = []string{" v1.0.0 ", "v1.0.1"}
-	logGz := gzipLines(t, "2026-07-08T19:00:00Z hello")
 
 	meta := submission.Metadata{GenesisSHA256: "abc123", GnolandVersion: "v1.0.0"}
-	genesisMatch, versionSupported, _ := AutoChecks(meta, logGz, cfg)
+	genesisMatch, versionSupported := MetadataChecks(meta, cfg)
 	if !genesisMatch {
 		t.Error("genesisMatch = false, want true: the same hash in a different case is the same hash")
 	}
@@ -85,7 +82,7 @@ func TestAutoChecks_GenesisAndVersionToleratePresentation(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_LogWindowFullyCovered(t *testing.T) {
+func TestScanLogWindow_FullyCovered(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t,
 		"2026-07-08T17:00:00Z starting up",
@@ -93,20 +90,20 @@ func TestAutoChecks_LogWindowFullyCovered(t *testing.T) {
 		"2026-07-09T19:00:00Z shutting down",
 	)
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if !window.Detected || !window.Covered {
 		t.Errorf("window = %+v, want Detected and Covered", window)
 	}
 }
 
-func TestAutoChecks_LogWindowStartsAfterWindowOpened(t *testing.T) {
+func TestScanLogWindow_StartsAfterWindowOpened(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t,
 		"2026-07-08T19:00:00Z starting up",
 		"2026-07-08T20:00:00Z consensus running",
 	)
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if !window.Detected {
 		t.Error("window.Detected = false, want true")
 	}
@@ -115,7 +112,7 @@ func TestAutoChecks_LogWindowStartsAfterWindowOpened(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_LogWindowEndsBeforeWindowClosed(t *testing.T) {
+func TestScanLogWindow_EndsBeforeWindowClosed(t *testing.T) {
 	// The start side is fine and only the end side fails. Without this
 	// case the end-side half of the coverage check is dead weight: a
 	// start-side-only implementation passes every other test in the repo.
@@ -125,7 +122,7 @@ func TestAutoChecks_LogWindowEndsBeforeWindowClosed(t *testing.T) {
 		"2026-07-09T10:00:00Z stopped well before the window closed",
 	)
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if !window.Detected {
 		t.Error("window.Detected = false, want true")
 	}
@@ -159,8 +156,8 @@ func TestScanLogWindow_TruncatedIsNotTreatedAsCovered(t *testing.T) {
 	if window.Covered {
 		t.Error("window.Covered = true, want false: the tail was never read, so coverage was never verified")
 	}
-	if got := LogQualityScore(window); got != 19 {
-		t.Errorf("LogQualityScore = %d, want 19 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
+	if got := LogQualityScore(window, LogWindowCheck{}); got != 17 {
+		t.Errorf("LogQualityScore = %d, want 17 (partial credit — detected but unverified, neither full marks nor a penalty)", got)
 	}
 }
 
@@ -209,7 +206,7 @@ func TestScanLogWindow_UsesEarliestAndLatestTimestamps(t *testing.T) {
 }
 
 func TestScanLogWindow_BudgetBoundsDecompression(t *testing.T) {
-	// The bomb defence: gnoland.log.gz's content is itself compressed
+	// The bomb defence: validator.log.gz's content is itself compressed
 	// plaintext that ValidateArchive never decompresses, so this is the
 	// first place decompression happens and the budget is what keeps a
 	// small upload from expanding without limit.
@@ -234,27 +231,27 @@ func TestScanLogWindow_BudgetBoundsDecompression(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_LogWindowNotTruncatedWhenUnderCap(t *testing.T) {
+func TestScanLogWindow_NotTruncatedWhenUnderCap(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t, "2026-07-08T17:00:00Z starting up", "2026-07-09T19:00:00Z shutting down")
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if window.Truncated {
 		t.Errorf("window = %+v, want Truncated = false for a log well under the cap", window)
 	}
 }
 
-func TestAutoChecks_LogWindowNoTimestamps(t *testing.T) {
+func TestScanLogWindow_NoTimestamps(t *testing.T) {
 	cfg := windowTestConfig()
 	logGz := gzipLines(t, "no timestamp here", "nor here either")
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if window.Detected {
 		t.Errorf("window = %+v, want !Detected", window)
 	}
 }
 
-func TestAutoChecks_LogWindowDetectsJSONEpochTimestamps(t *testing.T) {
+func TestScanLogWindow_DetectsJSONEpochTimestamps(t *testing.T) {
 	// gnoland's actual logger (cometbft/tendermint-style) emits structured
 	// JSON lines with a "ts" field holding a Unix epoch float, not a
 	// leading RFC3339 string — e.g.
@@ -273,7 +270,7 @@ func TestAutoChecks_LogWindowDetectsJSONEpochTimestamps(t *testing.T) {
 		`{"level":"info","ts":1783623600,"msg":"shutting down","module":"main"}`,
 	)
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if !window.Detected {
 		t.Fatalf("window = %+v, want Detected (JSON \"ts\" epoch timestamps should be recognized)", window)
 	}
@@ -291,7 +288,7 @@ func TestAutoChecks_LogWindowDetectsJSONEpochTimestamps(t *testing.T) {
 	}
 }
 
-func TestAutoChecks_LogWindowIgnoresJSONLinesWithoutTs(t *testing.T) {
+func TestScanLogWindow_IgnoresJSONLinesWithoutTs(t *testing.T) {
 	// A JSON line missing "ts" (or with a non-numeric one) must be
 	// skipped like any other unparseable line, not treated as a zero
 	// timestamp — that would silently drag FirstSeen back to the Unix
@@ -303,16 +300,16 @@ func TestAutoChecks_LogWindowIgnoresJSONLinesWithoutTs(t *testing.T) {
 		`not json at all`,
 	)
 
-	_, _, window := AutoChecks(submission.Metadata{}, logGz, cfg)
+	window := ScanLogWindow(logGz, cfg)
 	if window.Detected {
 		t.Errorf("window = %+v, want !Detected", window)
 	}
 }
 
-func TestAutoChecks_LogNotGzip(t *testing.T) {
+func TestScanLogWindow_LogNotGzip(t *testing.T) {
 	cfg := windowTestConfig()
 
-	_, _, window := AutoChecks(submission.Metadata{}, strings.NewReader("not gzip at all"), cfg)
+	window := ScanLogWindow(strings.NewReader("not gzip at all"), cfg)
 	if window.Detected || window.Covered {
 		t.Errorf("window = %+v, want the zero value for unparseable input", window)
 	}

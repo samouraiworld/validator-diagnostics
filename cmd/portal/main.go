@@ -6,12 +6,14 @@
 // -s3-bucket (+ -s3-region/-s3-endpoint, with credentials from the
 // S3_ACCESS_KEY/S3_SECRET_KEY environment variables) for production.
 //
-// The archive's *extracted content* — metadata.json whole, then the
-// decompressed gnoland.log.gz in 1 GiB windows — is streamed to clamd for
-// a malware scan before being stored, when -clamav-addr is set; the scan
-// still fails closed. clamd's own StreamMaxLength (the bundled clamd.conf
-// sets it to 2147483647) now only has to cover one window plus its 1 MiB
-// overlap, not the whole -max-upload-size archive.
+// The archive's *extracted content* — metadata.json whole, then each
+// decompressed log entry (validator.log.gz, and sentry.log.gz when
+// submitted) in 1 GiB windows, under one shared per-submission budget —
+// is streamed to clamd for a malware scan before being stored, when
+// -clamav-addr is set; the scan still fails closed. clamd's own
+// StreamMaxLength (the bundled clamd.conf sets it to 2147483647) now only
+// has to cover one window plus its 1 MiB overlap, not the whole
+// -max-upload-size archive.
 //
 // Required environment variables:
 //   - ADMIN_OPERATOR_ADDRESSES — comma-separated bech32 operator
@@ -87,18 +89,20 @@ var staticFiles embed.FS
 // because they cannot import a Go constant; keep all three in step.
 const defaultMaxUploadSize = 4294967296 // 4 GiB; see README.md's "Upload size and ClamAV"
 
-// defaultMaxLogSize caps the gnoland.log.gz entry inside the archive.
+// defaultMaxLogSize caps each log entry inside the archive
+// (validator.log.gz and, when submitted, sentry.log.gz).
 // submission's own default is 2 GiB; this deployment now matches
 // defaultMaxUploadSize instead of standardising lower, because a real
-// submission needs the headroom:
-// test/samourai-crew-huge-*.tar.gz's gnoland.log.gz entry alone is
-// 2423361333 bytes compressed, well past the previous 256 MiB ceiling.
+// submission needs the headroom: test/samourai-crew-huge-*.tar.gz's log
+// entry alone is 2423361333 bytes compressed, well past the previous 256
+// MiB ceiling.
 //
-// The entry is streamed and never buffered (see submission.ValidateArchive
-// and submission.OpenLog), so this bounds *compressed* bytes read out of
+// Each entry is streamed and never buffered (see submission.ValidateArchive
+// and submission.ScanLogs), so this bounds *compressed* bytes read out of
 // the archive rather than resident memory. Two separate bounds apply to the
 // *decompressed* bytes: scoring.maxLogWindowBytes (1 GiB) for the log-window
-// scan, and -av-scan-budget (32 GiB) for the antivirus.
+// scan, and -av-scan-budget (32 GiB, shared across both logs) for the
+// antivirus.
 //
 // Raise it with -max-log-size (MAX_LOG_SIZE in .env) if real submissions
 // bump into it — they are rejected with a clear message when they do.
@@ -124,8 +128,8 @@ func main() {
 	clamavAddr := flag.String("clamav-addr", "", "clamd address to scan uploads against (host:port, or unix:/path/to/socket); leave empty to disable AV scanning (NOT recommended for production)")
 	clamavTimeout := flag.Duration("clamav-timeout", 15*time.Minute, "how long a single clamd scan may take, dial included; bounds one scan window now (at most 1 GiB, roughly 7s at the measured rate), not the whole upload")
 	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; clamd never sees more than a 1 GiB window of it at a time, so raising this is a storage/time question, not a clamd one (storage.S3Store.Save's single PutObject caps at 5 GiB)")
-	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of the gnoland.log.gz entry inside the archive; the entry is streamed rather than buffered, so this bounds decompression work rather than memory")
-	avScanBudget := flag.Int64("av-scan-budget", clamav.DefaultScanBudget, "maximum decompressed bytes of gnoland.log.gz submitted to the antivirus; a submission that exceeds it is accepted and recorded as partially scanned, not rejected")
+	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of each log entry inside the archive (validator.log.gz, sentry.log.gz); each entry is streamed rather than buffered, so this bounds decompression work rather than memory")
+	avScanBudget := flag.Int64("av-scan-budget", clamav.DefaultScanBudget, "maximum decompressed bytes of log content submitted to the antivirus per submission, shared across validator.log.gz and sentry.log.gz; a submission that exceeds it is accepted and recorded as partially scanned, not rejected")
 	flag.Parse()
 
 	if *remote == "" {

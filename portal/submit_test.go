@@ -84,19 +84,21 @@ func (f fakeScanner) Scan(ctx context.Context, r io.Reader) (clamav.Verdict, err
 	return f.verdict, f.err
 }
 
-// buildValidArchive is buildArchiveWithLog carrying a genuinely
-// decompressible gnoland.log.gz. The AV pass reads that stream now, so the
-// hand-rolled two-magic-bytes stand-in this used to write would be rejected
-// as an unreadable log rather than exercising the happy path.
 func buildValidArchive(t *testing.T, validatorAddress string) []byte {
 	t.Helper()
 	return buildArchiveWithLog(t, validatorAddress, gzipBytes(t, []byte("fake gzip log payload")))
 }
 
-// buildArchiveWithLog builds the same archive with the gnoland.log.gz
+// buildArchiveWithLog builds the archive with the validator.log.gz
 // entry's raw bytes under the caller's control, so a test can supply a
-// broken or truncated gzip.
+// broken or truncated gzip, and no sentry log.
 func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byte) []byte {
+	t.Helper()
+	return buildArchiveWithLogs(t, validatorAddress, logContent, nil)
+}
+
+// buildArchiveWithLogs adds sentry.log.gz when sentryContent is non-nil.
+func buildArchiveWithLogs(t *testing.T, validatorAddress string, logContent, sentryContent []byte) []byte {
 	t.Helper()
 
 	metadata := []byte(`{
@@ -114,17 +116,26 @@ func buildArchiveWithLog(t *testing.T, validatorAddress string, logContent []byt
 		"recent_operations": "None"
 	}`)
 
+	entries := []struct {
+		name    string
+		content []byte
+	}{{"validator.log.gz", logContent}}
+	if sentryContent != nil {
+		entries = append(entries, struct {
+			name    string
+			content []byte
+		}{"sentry.log.gz", sentryContent})
+	}
+	entries = append(entries, struct {
+		name    string
+		content []byte
+	}{"metadata.json", metadata})
+
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
 
-	for _, e := range []struct {
-		name    string
-		content []byte
-	}{
-		{"gnoland.log.gz", logContent},
-		{"metadata.json", metadata},
-	} {
+	for _, e := range entries {
 		hdr := &tar.Header{Name: e.name, Typeflag: tar.TypeReg, Size: int64(len(e.content)), Mode: 0o644}
 		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatalf("WriteHeader: %v", err)
@@ -510,6 +521,39 @@ func TestSubmitHandler_RecordsLogOnSuccess(t *testing.T) {
 	}
 }
 
+// TestSubmitHandler_RecordsSentryEnabledFromMetadata is the regression
+// test for Entry.SentryEnabled: nothing else in the suite submits an
+// archive and then reads that field back, so deleting its assignment in
+// ServeHTTP left every other test green while summary.go's "ℹ️ no
+// sentry.log.gz submitted (sentry_enabled is true)" line would never
+// fire for anyone in production.
+func TestSubmitHandler_RecordsSentryEnabledFromMetadata(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+	handler := &SubmitHandler{Sessions: sessions, Store: store, Log: submissionLog}
+
+	// buildArchiveWithLogs's metadata.json always declares
+	// sentry_enabled: true; passing nil for sentryContent submits no
+	// sentry.log.gz, which is exactly the "declared but not sent" case
+	// the summary line exists for.
+	archive := buildArchiveWithLogs(t, operatorAddr.String(), gzipBytes(t, []byte("validator payload")), nil)
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	if len(submissionLog.entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(submissionLog.entries))
+	}
+	if !submissionLog.entries[0].SentryEnabled {
+		t.Error("Entry.SentryEnabled = false, want true: metadata.json declared sentry_enabled true")
+	}
+}
+
 func TestSubmitHandler_DoesNotRecordLogOnFailure(t *testing.T) {
 	operatorAddr := testOperatorAddr()
 	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
@@ -734,6 +778,123 @@ func TestSubmitHandler_ScoresPendingWhenExerciseNotConfigured(t *testing.T) {
 	}
 }
 
+// scoringHarness wires a handler with a configured exercise, and knows
+// how to build a log whose timestamps bracket that exercise's
+// investigation window.
+type scoringHarness struct {
+	handler  *SubmitHandler
+	sessions *auth.SessionSigner
+	log      *fakeLog
+	scores   *scoring.Store
+	cfg      exercise.Config
+}
+
+func newScoringHarness(t *testing.T) *scoringHarness {
+	t.Helper()
+
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	submissionLog := &fakeLog{}
+
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	cfg := exercise.Config{
+		// A 4h announce-to-deadline window with AnnouncedAt just a
+		// minute in the past keeps "submit now" well inside the first
+		// quarter, regardless of how long the test takes to run.
+		AnnouncedAt:              time.Now().UTC().Add(-time.Minute),
+		DeadlineAt:               time.Now().UTC().Add(4 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
+	}
+	if err := exerciseStore.Set(cfg); err != nil {
+		t.Fatalf("exerciseStore.Set: %v", err)
+	}
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+
+	return &scoringHarness{
+		handler: &SubmitHandler{
+			Sessions: sessions,
+			Store:    newFakeStore(),
+			Log:      submissionLog,
+			Exercise: exerciseStore,
+			Scores:   scoresStore,
+		},
+		sessions: sessions,
+		log:      submissionLog,
+		scores:   scoresStore,
+		cfg:      cfg,
+	}
+}
+
+// submit posts archive and returns the scoring record written for it.
+func (h *scoringHarness) submit(t *testing.T, addr crypto.Address, archive []byte) scoring.Result {
+	t.Helper()
+
+	if status := submitArchive(t, h.handler, h.sessions, addr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	h.log.mu.Lock()
+	id := h.log.entries[0].ID
+	h.log.mu.Unlock()
+
+	result, ok, err := h.scores.Get(id)
+	if err != nil {
+		t.Fatalf("scores.Get: %v", err)
+	}
+	if !ok || !result.Scored {
+		t.Fatalf("result = %+v, ok = %v, want a Scored result", result, ok)
+	}
+	return result
+}
+
+// coveringLog returns a gzipped log whose timestamps bracket the
+// harness's investigation window on both sides, so the window scan
+// reports Covered.
+func (h *scoringHarness) coveringLog(t *testing.T) []byte {
+	t.Helper()
+
+	lines := h.cfg.InvestigationWindowStart.Add(-time.Hour).Format(time.RFC3339) + " started\n" +
+		h.cfg.InvestigationWindowEnd.Add(time.Hour).Format(time.RFC3339) + " still running\n"
+	return gzipBytes(t, []byte(lines))
+}
+
+func TestSubmitHandler_ScoresASubmittedSentryLog(t *testing.T) {
+	h := newScoringHarness(t)
+	addr := testOperatorAddr()
+	logContent := h.coveringLog(t)
+
+	result := h.submit(t, addr, buildArchiveWithLogs(t, addr.String(), logContent, logContent))
+
+	if !result.SentryLogPresent {
+		t.Error("SentryLogPresent = false, want true")
+	}
+	if !result.SentryLogWindow.Covered {
+		t.Errorf("SentryLogWindow = %+v, want Covered", result.SentryLogWindow)
+	}
+	if result.LogQualityScore != 25 {
+		t.Errorf("LogQualityScore = %d, want 25 (13 base + 8 validator + 4 sentry)", result.LogQualityScore)
+	}
+}
+
+func TestSubmitHandler_CapsLogQualityWithoutASentryLog(t *testing.T) {
+	h := newScoringHarness(t)
+	addr := testOperatorAddr()
+
+	result := h.submit(t, addr, buildArchiveWithLogs(t, addr.String(), h.coveringLog(t), nil))
+
+	if result.SentryLogPresent {
+		t.Error("SentryLogPresent = true, want false")
+	}
+	if result.SentryLogWindow.Detected {
+		t.Errorf("SentryLogWindow = %+v, want the zero value when no sentry log was submitted", result.SentryLogWindow)
+	}
+	if result.LogQualityScore != 21 {
+		t.Errorf("LogQualityScore = %d, want 21 (13 base + 8 for the covered validator log)", result.LogQualityScore)
+	}
+}
+
 // submitArchive posts archive to a server wrapping handler and returns the
 // response status. handler's Sessions must be sessions.
 func submitArchive(t *testing.T, handler *SubmitHandler, sessions *auth.SessionSigner, addr crypto.Address, archive []byte) int {
@@ -787,6 +948,168 @@ func (s *capturingScanner) captured() [][]byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.streams
+}
+
+// avHandler wires a handler whose only job is the antivirus path, with
+// the scanner and log the assertions read back.
+func avHandler(t *testing.T, scanner clamav.Scanner, budget int64) (*SubmitHandler, *auth.SessionSigner, *fakeLog, *fakeStore) {
+	t.Helper()
+
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	submissionLog := &fakeLog{}
+	store := newFakeStore()
+
+	return &SubmitHandler{
+		Sessions:     sessions,
+		Store:        store,
+		Log:          submissionLog,
+		AVScanner:    scanner,
+		AVScanBudget: budget,
+	}, sessions, submissionLog, store
+}
+
+func TestSubmitHandler_ScansTheSentryLogToo(t *testing.T) {
+	scanner := &capturingScanner{}
+	handler, sessions, submissionLog, _ := avHandler(t, scanner, 0)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, []byte("validator payload")),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+
+	streams := scanner.captured()
+	if len(streams) != 3 {
+		t.Fatalf("got %d scans, want 3 (metadata.json, then each log)", len(streams))
+	}
+	if string(streams[1]) != "validator payload" {
+		t.Errorf("second scan = %q, want the decompressed validator log", streams[1])
+	}
+	if string(streams[2]) != "sentry payload" {
+		t.Errorf("third scan = %q, want the decompressed sentry log — an unscanned entry must never be stored", streams[2])
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a coverage claim")
+	}
+	want := int64(len("validator payload") + len("sentry payload"))
+	if !got.Complete || got.Bytes != want {
+		t.Errorf("Scan = %+v, want complete coverage of %d bytes across both logs", *got, want)
+	}
+}
+
+func TestSubmitHandler_RejectsInfectedSentryLog(t *testing.T) {
+	// Clean for metadata.json and the validator log, infected on the
+	// third stream — the sentry log.
+	scanner := &capturingScanner{verdicts: []clamav.Verdict{
+		{},
+		{},
+		{Infected: true, Signature: "Test.Sentry"},
+	}}
+	handler, sessions, _, store := avHandler(t, scanner, 0)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, []byte("validator payload")),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("an archive with an infected sentry log was stored")
+	}
+}
+
+func TestSubmitHandler_RejectsInfectedValidatorLogWithSentryPresent(t *testing.T) {
+	// Clean for metadata.json, infected on the second stream — the
+	// validator log — with a sentry log also present in the archive. The
+	// walk must stop right there: the sentry log's content must never
+	// reach the scanner at all.
+	scanner := &capturingScanner{verdicts: []clamav.Verdict{
+		{},
+		{Infected: true, Signature: "Test.Validator"},
+	}}
+	handler, sessions, _, store := avHandler(t, scanner, 0)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, []byte("validator payload")),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("an archive with an infected validator log was stored")
+	}
+
+	streams := scanner.captured()
+	if len(streams) != 2 {
+		t.Fatalf("got %d scans, want 2 (metadata.json, then the infected validator log) — the walk should have stopped before the sentry log", len(streams))
+	}
+	for _, chunk := range streams {
+		if bytes.Contains(chunk, []byte("sentry payload")) {
+			t.Error("the sentry log was scanned after the validator log was already found infected")
+		}
+	}
+}
+
+func TestSubmitHandler_RejectsUnreadableSentryLogGzip(t *testing.T) {
+	handler, sessions, _, store := avHandler(t, &capturingScanner{}, 0)
+	addr := testOperatorAddr()
+
+	// The right magic bytes over a header that is not a gzip header:
+	// ValidateArchive accepts it, and nothing beyond it can ever be read.
+	broken := append([]byte{0x1f, 0x8b}, []byte("not really a gzip header at all")...)
+	archive := buildArchiveWithLogs(t, addr.String(), gzipBytes(t, []byte("validator payload")), broken)
+
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: an optional entry nothing can read is still an entry nothing can scan", status)
+	}
+	if _, ok := store.get("samourai-20260709-1830UTC.tar.gz"); ok {
+		t.Error("the archive was stored despite carrying an entirely unscanned entry")
+	}
+}
+
+func TestSubmitHandler_ScanBudgetIsSharedAcrossBothLogs(t *testing.T) {
+	// A budget smaller than the validator log alone. The sentry log must
+	// then go unscanned and coverage must say so — it must NOT be scanned
+	// under a silently restored full budget, which is what handing
+	// WindowedScanner a non-positive Budget would quietly do.
+	scanner := &capturingScanner{}
+	handler, sessions, submissionLog, _ := avHandler(t, scanner, 512)
+	addr := testOperatorAddr()
+
+	archive := buildArchiveWithLogs(t, addr.String(),
+		gzipBytes(t, bytes.Repeat([]byte("x"), 4096)),
+		gzipBytes(t, []byte("sentry payload")),
+	)
+	if status := submitArchive(t, handler, sessions, addr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an exhausted budget is recorded, not rejected)", status)
+	}
+
+	for _, chunk := range scanner.captured() {
+		if bytes.Contains(chunk, []byte("sentry payload")) {
+			t.Error("the sentry log was scanned after the budget was already spent")
+		}
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a coverage claim")
+	}
+	if got.Complete {
+		t.Error("Scan.Complete = true, want false when a log went unscanned for want of budget")
+	}
 }
 
 func TestSubmitHandler_ScansExtractedContentNotTheArchive(t *testing.T) {
@@ -886,6 +1209,53 @@ func TestSubmitHandler_AcceptsTruncatedLogWithPartialCoverage(t *testing.T) {
 	}
 	if got.Complete {
 		t.Error("Complete = true, want false: the stream broke before the end")
+	}
+}
+
+// TestSubmitHandler_FirstLogIncompleteSecondCompleteStaysIncomplete is the
+// regression test for scanArchive's Complete aggregation
+// (coverage.Complete = coverage.Complete && c.Complete). The only other
+// multi-entry AV test in this file (ScanBudgetIsSharedAcrossBothLogs) has
+// the *second* log skipped outright, so an aggregation that just took the
+// last result (coverage.Complete = c.Complete) would be indistinguishable
+// from the correct AND — both leave Complete false when the second log
+// never scans at all. Here the first log (validator) is truncated and the
+// second (sentry) scans cleanly to completion, so only the AND form
+// reports the archive's overall coverage as incomplete.
+func TestSubmitHandler_FirstLogIncompleteSecondCompleteStaysIncomplete(t *testing.T) {
+	operatorAddr := testOperatorAddr()
+	sessions := auth.NewSessionSigner([]byte("test-secret"), 5*time.Minute)
+	store := newFakeStore()
+	submissionLog := &fakeLog{}
+
+	handler := &SubmitHandler{
+		Sessions:  sessions,
+		Store:     store,
+		Log:       submissionLog,
+		AVScanner: &capturingScanner{},
+	}
+
+	// The validator log's gzip stream is cut short mid-body, exactly as in
+	// AcceptsTruncatedLogWithPartialCoverage above; the sentry log is a
+	// small, intact stream that scans to completion under the default
+	// budget.
+	full := gzipBytes(t, []byte("a log that was being written when the disk filled up"))
+	truncatedValidator := full[:len(full)-8]
+	intactSentry := gzipBytes(t, []byte("small intact sentry log"))
+	archive := buildArchiveWithLogs(t, operatorAddr.String(), truncatedValidator, intactSentry)
+
+	if status := submitArchive(t, handler, sessions, operatorAddr, archive); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: what could be read was read", status)
+	}
+
+	submissionLog.mu.Lock()
+	defer submissionLog.mu.Unlock()
+	got := submissionLog.entries[0].Scan
+	if got == nil {
+		t.Fatal("Entry.Scan = nil, want a partial coverage claim")
+	}
+	if got.Complete {
+		t.Error("Complete = true, want false: the first log's stream broke, and one incomplete log must settle it for the whole archive")
 	}
 }
 

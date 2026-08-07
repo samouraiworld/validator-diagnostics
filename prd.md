@@ -45,13 +45,15 @@ Archive structure:
 
 ```
 <moniker>-<YYYYMMDD-HHMMUTC>.tar.gz
-├── gnoland.log.gz
+├── validator.log.gz
+├── sentry.log.gz (optional)
 └── metadata.json
 ```
 
 Where:
 
-- `gnoland.log.gz` contains the node logs covering the requested investigation time window.
+- `validator.log.gz` contains the node logs covering the requested investigation time window.
+- `sentry.log.gz` (optional) contains the sentry node's logs for the same window, when the validator runs one.
 - `metadata.json` contains the information required to identify the validator and its environment.
 
 ---
@@ -105,7 +107,7 @@ Additional enum values may be added in future versions.
 
 ## Mandatory
 
-- `gnoland.log.gz`
+- `validator.log.gz`
 - `metadata.json`
 
 ---
@@ -233,7 +235,7 @@ Submission deadline (UTC):
 
 Required artifacts:
 
-- gnoland.log.gz
+- validator.log.gz
 - metadata.json
 
 Upload portal:
@@ -317,6 +319,13 @@ Each exercise can be scored.
 | Log quality | 25 |
 | Incident response quality | 25 |
 
+**Log quality** breaks down as: 13 points for passing archive-structure
+validation, up to 8 more if `validator.log.gz`'s timestamps are verified to
+cover the investigation window (4 if timestamps were found but coverage
+could not be verified), and up to 4 more if a submitted `sentry.log.gz`
+covers the same window (2 if merely detected). A submission with no sentry
+log therefore caps at 21 of the 25.
+
 Maximum score:
 
 **100 points**
@@ -375,7 +384,7 @@ Submitted archives come from third parties and **must be treated as untrusted in
 - Extract and process archives inside an isolated, ephemeral, network-restricted environment (container/sandbox) with minimal privileges. Destroy the environment after processing.
 - Enforce a strict decompressed-size limit, independent from the compressed upload size limit, to mitigate zip/tar bombs. Apply CPU, memory, and time limits to extraction and parsing.
 - Reject archive entries with path traversal (`..`, absolute paths), and reject symlinks, hardlinks, and device files. Only regular files are accepted.
-- Only accept the exact expected entries (`gnoland.log.gz`, `metadata.json`); reject archives containing unexpected additional files.
+- Only accept the exact expected entries (`validator.log.gz`, `metadata.json`, and the optional `sentry.log.gz`); reject archives containing unexpected additional files.
 - Validate file types using content signatures (magic bytes), not just file extensions.
 - Run an antivirus scan (e.g. ClamAV) on extracted content as defense in depth.
 - Treat log content as untrusted text when displayed or re-injected elsewhere (dashboards, Discord, terminals): sanitize/escape control characters, ANSI sequences, and HTML/markdown before rendering.
@@ -384,7 +393,7 @@ Submitted archives come from third parties and **must be treated as untrusted in
 **Status: implemented.** The `submission` package enforces the naming convention, structural, and anti-abuse rules above:
 
 - `submission/name.go` — `ValidateFilename` checks the `<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz` convention.
-- `submission/archive.go` — `ValidateArchive` streams the tar.gz and enforces: only the two expected entries (fail-closed on anything else, including path-traversal names — blocked by exact-name allowlisting rather than a traversal blocklist), regular files only (symlinks/hardlinks/directories/devices rejected), no duplicate entries, per-entry size caps enforced via a bounded reader regardless of what the archive's headers or compression ratio claim (zip/tar-bomb protection), and gzip magic-byte verification on `gnoland.log.gz`.
+- `submission/archive.go` — `ValidateArchive` streams the tar.gz and enforces: only the three known entries (fail-closed on anything else, including path-traversal names — blocked by exact-name allowlisting rather than a traversal blocklist) — `validator.log.gz` and `metadata.json` are required, `sentry.log.gz` is optional — regular files only (symlinks/hardlinks/directories/devices rejected), no duplicate entries, per-entry size caps enforced via a bounded reader regardless of what the archive's headers or compression ratio claim (zip/tar-bomb protection), and gzip magic-byte verification on both `validator.log.gz` and `sentry.log.gz`.
 - `submission/metadata.go` — `ValidateMetadata` enforces the Metadata Schema table's enum constraints (`architecture`, `deployment_method`) and required fields, rejecting unknown fields outright.
 - Covered by `submission/*_test.go` (22 test cases), including explicit path-traversal, symlink/hardlink, oversized-entry, and bad-magic-bytes cases — not just the happy path.
 

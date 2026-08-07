@@ -113,8 +113,8 @@ validator for a submission that actually succeeded.
 | `-clamav-addr` | no (recommended) | clamd address to scan uploads against — `host:port`, or `unix:/path/to/socket`. Unset disables scanning: fine for local dev, **not** for production |
 | `-clamav-timeout` | no | Time budget for one clamd scan, dial included (default `15m`). Bounds a single scan window now (at most 1 GiB, roughly 7s at the measured rate), not the whole upload |
 | `-max-upload-size` | no | Maximum accepted upload, in bytes (default 4294967296 — 4 GiB. Not a scan limit: clamd never sees more than one 1 GiB window at a time). Raising it is a disk/S3/time question — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `-max-log-size` | no | Maximum accepted size of the `gnoland.log.gz` entry inside the archive, in bytes (default 4294967296 — 4 GiB). The entry is streamed, not buffered, so this bounds decompression work rather than memory |
-| `-av-scan-budget` | no | Maximum decompressed bytes of `gnoland.log.gz` the antivirus examines per submission (default 34359738368 — 32 GiB). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `-max-log-size` | no | Maximum accepted size of each log entry inside the archive (`validator.log.gz`, `sentry.log.gz`), in bytes (default 4294967296 — 4 GiB). Each entry is streamed, not buffered, so this bounds decompression work rather than memory |
+| `-av-scan-budget` | no | Maximum decompressed bytes of log content the antivirus examines per submission, shared across `validator.log.gz` and `sentry.log.gz` under one budget (default 34359738368 — 32 GiB). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
 
 | Environment variable | Required | Description |
 |-----------------------|----------|-------------|
@@ -123,16 +123,18 @@ validator for a submission that actually succeeded.
 | `ADMIN_SESSION_SECRET` | no | Hex-encoded HMAC secret for admin session tokens, kept separate from `SESSION_SECRET` so restarting the portal or rotating one secret doesn't affect the other session type. If unset, a random one is generated for the run |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | with `-s3-bucket` | Credentials for the S3-compatible backend |
 | `MAX_UPLOAD_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-upload-size` (default 4294967296 — 4 GiB: clamd never sees more than one 1 GiB scan window at a time, so raising this is a disk/S3/time question instead). Unlike the other variables here, the binary does not read it directly — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 4294967296 — 4 GiB). Not read directly by the binary either. Bounds the *compressed* entry; the antivirus no longer caps the decompressed size — that's `AV_SCAN_BUDGET` (coverage) and `scoring.maxLogWindowBytes` (partial credit for automatic scoring only) — see [Upload size and ClamAV](#upload-size-and-clamav) |
-| `AV_SCAN_BUDGET` | no | Read by `docker-compose.yml` and passed through as `-av-scan-budget` (default 34359738368, i.e. 32 GiB of decompressed log bytes). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `MAX_LOG_SIZE` | no | Read by `docker-compose.yml` and passed through as `-max-log-size` (default 4294967296 — 4 GiB). Not read directly by the binary either. Bounds each *compressed* log entry (`validator.log.gz`, `sentry.log.gz`); the antivirus no longer caps the decompressed size — that's `AV_SCAN_BUDGET` (coverage) and `scoring.maxLogWindowBytes` (partial credit for automatic scoring only) — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `AV_SCAN_BUDGET` | no | Read by `docker-compose.yml` and passed through as `-av-scan-budget` (default 34359738368, i.e. 32 GiB of decompressed log bytes, shared across both `validator.log.gz` and `sentry.log.gz` under one budget per submission). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
 
 ### Upload size and ClamAV
 
 clamd never sees the raw archive. Before anything is stored, the upload is
 taken apart and its extracted content is streamed to clamd: `metadata.json`
-whole, then the decompressed `gnoland.log.gz` in 1 GiB windows with a 1 MiB
-overlap between consecutive windows, so a signature straddling a window
-boundary is still caught (`clamav.WindowedScanner`). The scan still fails
+whole, then each decompressed log entry — `validator.log.gz`, and
+`sentry.log.gz` when submitted — in 1 GiB windows with a 1 MiB overlap
+between consecutive windows, so a signature straddling a window boundary is
+still caught (`clamav.WindowedScanner`). Both logs are scanned under one
+shared per-submission budget, not one budget each. The scan still fails
 closed: an infected verdict *or* the scanner itself failing rejects the
 submission and stores nothing.
 
@@ -146,7 +148,7 @@ produces 1 GiB windows.
 
 `-max-upload-size` / `MAX_UPLOAD_SIZE` defaults to **4294967296 bytes —
 4 GiB**, raised from a previous 2147483647 (2 GiB - 1) so that a real
-archive this feature exists for — a `gnoland.log.gz` entry too big for the
+archive this feature exists for — a `validator.log.gz` entry too big for the
 old ceiling — is actually accepted; see `defaultMaxUploadSize` in
 `cmd/portal/main.go` for the archive size that motivated it. Raising it
 further no longer costs clamd anything — it costs disk: uploads over
@@ -176,15 +178,17 @@ The ceiling applies to **every file clamd extracts**, not just what is
 handed to it directly — which is exactly why a scan window is 1 GiB
 rather than something closer to the wall: there has to be room left for
 the 1 MiB overlap on top without the total ever approaching
-2147483647. A validator's `gnoland.log.gz` — however large it decompresses
-to — is scanned in bounded pieces instead of as one stream, so it never
-reaches this ceiling; a genuinely huge log just means more windows, not a
+2147483647. Each of a validator's submitted logs — `validator.log.gz` and,
+when present, `sentry.log.gz` — however large it decompresses to, is
+scanned in bounded pieces instead of as one stream, so neither ever reaches
+this ceiling; a genuinely huge log just means more windows, not a
 rejection.
 
 What now bounds a submission's antivirus coverage is `-av-scan-budget` /
-`AV_SCAN_BUDGET` (default 32 GiB of decompressed log): once that much has
-been examined, scanning stops — not because clamd rejects anything, but as
-the tar/zip-bomb defence `prd.md` asks for. See
+`AV_SCAN_BUDGET` (default 32 GiB of decompressed log, shared across both
+logs): once that much has been examined across the two of them, scanning
+stops — not because clamd rejects anything, but as the tar/zip-bomb
+defence `prd.md` asks for. See
 [What a partial scan means](#what-a-partial-scan-means) below for what
 happens to a submission when it does.
 
@@ -200,10 +204,11 @@ turn the setting off.
 #### What a partial scan means
 
 A submission's antivirus coverage can end early two ways and still be
-accepted: the budget (`-av-scan-budget`) runs out, or the log stream
-itself breaks partway through — a truncated `gnoland.log.gz`. Either way
-the submission is **accepted, stored, and badged** — never silently
-treated as fully scanned, and never rejected for this reason alone.
+accepted: the shared budget (`-av-scan-budget`) runs out, or one log's
+stream itself breaks partway through — a truncated `validator.log.gz` or
+`sentry.log.gz`. Either way the submission is **accepted, stored, and
+badged** — never silently treated as fully scanned, and never rejected for
+this reason alone.
 
 clamd disconnecting mid-window is different, not a third partial-coverage
 case: that is the *scanner* failing, not the log source, and
@@ -217,9 +222,10 @@ was and wasn't examined travels with the record (`Entry.Scan`, a
 `Coverage{Complete, Bytes}`), and the admin dashboard shows it: `scan ✓`
 for complete coverage, `scan partiel` with a byte count for partial.
 
-A `gnoland.log.gz` that cannot be decompressed **at all** is different:
-nothing in it was ever readable, so nothing in it could be scanned, and
-the upload is rejected outright (400) rather than stored unscanned.
+A submitted log entry that cannot be decompressed **at all** is different —
+whether it's `validator.log.gz` or the optional `sentry.log.gz`: nothing in
+it was ever readable, so nothing in it could be scanned, and the upload is
+rejected outright (400) rather than stored unscanned.
 
 With `-clamav-addr` unset, none of this runs: no scanner means no
 `Entry.Scan` is ever recorded, and the dashboard shows **no scan badge at
@@ -305,8 +311,10 @@ challenge-tx flow validators use, restricted to the addresses in
    budget is accepted, stored, and recorded as partial — see
    [Upload size and ClamAV](#upload-size-and-clamav)), then
    scored against the configured exercise: genesis hash, gnoland version,
-   investigation-window coverage of the submitted log, and upload
-   timeliness. The one criterion no code can observe — incident response
+   investigation-window coverage of the submitted logs (a covering
+   `sentry.log.gz` earns extra log-quality credit on top of
+   `validator.log.gz`'s), and upload timeliness. The one criterion no code
+   can observe — incident response
    quality — is entered by an admin afterwards.
 6. **Frontend** (`cmd/portal/static/`) — a small, framework-free HTML/JS
    UI for both the validator flow and the admin dashboard, embedded into

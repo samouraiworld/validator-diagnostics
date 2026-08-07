@@ -390,8 +390,9 @@ async function refresh({ force = false } = {}) {
       } else {
         const partial = badge("caution", `scan partiel — ${formatBytes(s.scan.bytes)}`);
         partial.title =
-          "The antivirus stopped before the end of the log — the budget ran out, " +
-          "or the log's stream broke. The rest of it was never examined.";
+          "The antivirus did not examine everything submitted — the shared budget ran out " +
+          "before a log finished (or before a second log entry was even opened), or a log's " +
+          "stream broke. The rest of it was never examined.";
         checksCell.appendChild(partial);
       }
     }

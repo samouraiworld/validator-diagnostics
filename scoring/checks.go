@@ -13,12 +13,13 @@ import (
 )
 
 // maxLogWindowBytes bounds how much *decompressed* plaintext scanLogWindow
-// will read out of gnoland.log.gz, independent of the compressed-size cap
-// submission.ValidateArchive enforces and submission.OpenLog re-applies, and
+// will read out of one submitted log, independent of the compressed-size cap
+// submission.ValidateArchive enforces and submission.ScanLogs re-applies, and
 // independent of the antivirus's own decompressed budget
-// (clamav.DefaultScanBudget, 32 GiB). Two budgets over the same bytes, for
-// unrelated reasons: exceeding this one costs partial credit via
-// LogWindowCheck.Truncated, exceeding the antivirus's costs coverage.
+// (clamav.DefaultScanBudget, 32 GiB, shared across both logs). Two budgets
+// over the same bytes, for unrelated reasons: exceeding this one costs
+// partial credit via LogWindowCheck.Truncated, exceeding the antivirus's
+// costs coverage.
 //
 // It is set well above a plausible validator log rather than at the
 // smallest workable value, because the budget running out is not a free
@@ -41,14 +42,15 @@ var timestampLayouts = []string{
 	time.RFC3339,
 }
 
-// AutoChecks runs prd.md's Phase 3 "Automatic validation" checks for one
-// submission: genesis hash, supported gnoland version, and
-// investigation-window coverage of the submitted log. logGz must be the
-// stream returned by submission.OpenLog — the same archive entry
-// ValidateArchive already accepted, read straight out of the upload and
-// never buffered — and never a second, independent read of the raw upload
-// (see this repo's Phase 3 design spec, "Security").
-func AutoChecks(meta submission.Metadata, logGz io.Reader, cfg exercise.Config) (genesisMatch, versionSupported bool, window LogWindowCheck) {
+// MetadataChecks runs prd.md's Phase 3 metadata checks for one
+// submission: genesis hash and supported gnoland version.
+//
+// This and ScanLogWindow were one function (AutoChecks) until the
+// archive grew a second log. A single walk of the tar cannot hand two
+// entry readers to one function at once — the readers are only valid
+// one at a time — so the caller drives submission.ScanLogs and calls
+// ScanLogWindow per entry instead.
+func MetadataChecks(meta submission.Metadata, cfg exercise.Config) (genesisMatch, versionSupported bool) {
 	// Compared on content, not presentation. A hash is the same hash in
 	// either case — sha256sum emits lowercase, a block explorer or
 	// Windows CertUtil commonly uppercase — and form fields collect stray
@@ -65,8 +67,17 @@ func AutoChecks(meta submission.Metadata, logGz io.Reader, cfg exercise.Config) 
 		}
 	}
 
-	window = scanLogWindow(logGz, cfg, maxLogWindowBytes)
-	return genesisMatch, versionSupported, window
+	return genesisMatch, versionSupported
+}
+
+// ScanLogWindow scans one submitted log for timestamps covering the
+// exercise's investigation window. logGz must be an entry stream handed
+// out by submission.ScanLogs — the same archive entry ValidateArchive
+// already accepted, read straight out of the upload and never buffered
+// — and never a second, independent read of the raw upload (see this
+// repo's Phase 3 design spec, "Security").
+func ScanLogWindow(logGz io.Reader, cfg exercise.Config) LogWindowCheck {
+	return scanLogWindow(logGz, cfg, maxLogWindowBytes)
 }
 
 // scanLogWindow decompresses logGz under a reader bounded to budget

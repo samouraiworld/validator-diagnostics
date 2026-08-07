@@ -75,11 +75,28 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 			// the validator did wrong.
 			switch {
 			case !result.LogWindow.Detected:
-				b.WriteString("  - ⚠️ no recognizable timestamps found in gnoland.log.gz\n")
+				b.WriteString("  - ⚠️ no recognizable timestamps found in validator.log.gz\n")
 			case result.LogWindow.Truncated:
 				b.WriteString("  - ℹ️ log coverage could not be fully verified: the scan stopped before the end of the log\n")
 			case !result.LogWindow.Covered:
 				b.WriteString("  - ⚠️ logs do not fully cover the investigation window\n")
+			}
+
+			// Same one-line-at-most discipline as above. A validator who
+			// runs no sentry and says so is not flagged at all: there is
+			// nothing there to report, and the missing points already say
+			// it in the total.
+			switch {
+			case !result.SentryLogPresent:
+				if e.SentryEnabled {
+					b.WriteString("  - ℹ️ no sentry.log.gz submitted (sentry_enabled is true)\n")
+				}
+			case !result.SentryLogWindow.Detected:
+				b.WriteString("  - ⚠️ no recognizable timestamps found in sentry.log.gz\n")
+			case result.SentryLogWindow.Truncated:
+				b.WriteString("  - ℹ️ sentry log coverage could not be fully verified: the scan stopped before the end of the log\n")
+			case !result.SentryLogWindow.Covered:
+				b.WriteString("  - ⚠️ sentry logs do not fully cover the investigation window\n")
 			}
 		}
 

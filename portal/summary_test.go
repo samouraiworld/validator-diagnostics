@@ -341,6 +341,119 @@ func TestAdminSummaryHandler_NoSubmissions(t *testing.T) {
 	}
 }
 
+// renderSummary returns the Markdown the handler produces for a single
+// submission described by entry and result.
+func renderSummary(t *testing.T, entry Entry, result scoring.Result) string {
+	t.Helper()
+
+	submissionLog := NewFileLog(filepath.Join(t.TempDir(), "submissions.jsonl"))
+	if err := submissionLog.Record(context.Background(), entry); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	exerciseStore := exercise.NewFileStore(filepath.Join(t.TempDir(), "exercise.json"))
+	if err := exerciseStore.Set(exercise.Config{
+		AnnouncedAt:              time.Now().UTC().Add(-2 * time.Hour),
+		DeadlineAt:               time.Now().UTC().Add(2 * time.Hour),
+		InvestigationWindowStart: time.Now().UTC().Add(-24 * time.Hour),
+		InvestigationWindowEnd:   time.Now().UTC(),
+		ExpectedGenesisSHA256:    "deadbeef",
+		SupportedGnolandVersions: []string{"v1.0.0"},
+	}); err != nil {
+		t.Fatalf("exerciseStore.Set: %v", err)
+	}
+
+	scoresStore := scoring.NewStore(filepath.Join(t.TempDir(), "scores.json"))
+	if err := scoresStore.Set(result); err != nil {
+		t.Fatalf("scoresStore.Set: %v", err)
+	}
+
+	srv := httptest.NewServer(AdminSummaryHandler(submissionLog, exerciseStore, scoresStore))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(body)
+}
+
+// summaryEntry is a recorded submission with everything but the sentry
+// declaration fixed.
+func summaryEntry(sentryEnabled bool) Entry {
+	return Entry{
+		ID:              "scored-1",
+		Moniker:         "samourai",
+		OperatorAddress: "g1abc",
+		Filename:        "samourai-20260709-1830UTC.tar.gz",
+		SubmittedAt:     time.Now().UTC(),
+		SentryEnabled:   sentryEnabled,
+	}
+}
+
+// summaryResult is a fully-covering scored result; each test overrides
+// only the sentry fields it is about.
+func summaryResult() scoring.Result {
+	return scoring.Result{
+		SubmissionID:     "scored-1",
+		Scored:           true,
+		GenesisMatch:     true,
+		VersionSupported: true,
+		LogWindow:        scoring.LogWindowCheck{Detected: true, Covered: true},
+		UploadTimeScore:  25,
+		MetadataScore:    25,
+		LogQualityScore:  21,
+	}
+}
+
+func TestAdminSummary_FlagsAMissingSentryLog(t *testing.T) {
+	body := renderSummary(t, summaryEntry(true), summaryResult())
+
+	if !strings.Contains(body, "no sentry.log.gz submitted") {
+		t.Errorf("summary should note the missing sentry log, got:\n%s", body)
+	}
+}
+
+func TestAdminSummary_SaysNothingWhenNoSentryIsRun(t *testing.T) {
+	body := renderSummary(t, summaryEntry(false), summaryResult())
+
+	if strings.Contains(body, "sentry") {
+		t.Errorf("a validator running no sentry has nothing to flag, got:\n%s", body)
+	}
+}
+
+func TestAdminSummary_WarnsOnUncoveredSentryLog(t *testing.T) {
+	result := summaryResult()
+	result.SentryLogPresent = true
+	result.SentryLogWindow = scoring.LogWindowCheck{Detected: true}
+
+	body := renderSummary(t, summaryEntry(true), result)
+
+	if !strings.Contains(body, "sentry logs do not fully cover the investigation window") {
+		t.Errorf("summary should warn about the uncovered sentry log, got:\n%s", body)
+	}
+}
+
+func TestAdminSummary_NamesTheRenamedValidatorLog(t *testing.T) {
+	result := summaryResult()
+	result.LogWindow = scoring.LogWindowCheck{}
+
+	body := renderSummary(t, summaryEntry(false), result)
+
+	if !strings.Contains(body, "validator.log.gz") {
+		t.Errorf("summary should name validator.log.gz, got:\n%s", body)
+	}
+	if strings.Contains(body, "gnoland.log.gz") {
+		t.Errorf("summary still names the old log file, got:\n%s", body)
+	}
+}
+
 func TestAdminHandlers_RejectWrongMethod(t *testing.T) {
 	// All three implement their own method routing, and none of it was
 	// covered.
