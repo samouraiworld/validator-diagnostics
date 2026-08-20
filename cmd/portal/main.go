@@ -113,6 +113,32 @@ const defaultMaxUploadSize = 4294967296 // 4 GiB; see README.md's "Upload size a
 // cannot import a Go constant; keep all three in step.
 const defaultMaxLogSize = 4294967296 // 4 GiB; see README.md's "Upload size and ClamAV"
 
+// defaultMaxConcurrentSubmissions bounds how many uploads are processed at
+// once (see portal.LimitSubmissions for why a limit exists at all).
+//
+// 4 is chosen against a measurement, not a feeling. A single submission of
+// test/samourai-crew-huge-*.tar.gz — 2.4 GB compressed, tens of GB of log
+// once decompressed — took about an hour end to end on the target host,
+// and the transfer was not the slow part: the server was. That host is 8
+// cores with its Docker volumes on RAID5, where the dominant cost is disk,
+// because clamd spools every INSTREAM window before scanning it. Work of
+// that shape does not overlap when it is run in parallel; it queues, and
+// running more of it at once mostly stretches each one.
+//
+// The failure that makes this a limit rather than a nicety is
+// ClamdScanner's per-scan timeout: it is wall-clock and covers the dial, so
+// every extra concurrent submission pushes each scan window closer to it.
+// Cross it and the scan fails, which rejects the submission outright — the
+// most expensive possible outcome, an hour of work answered with a 503.
+//
+// So this is deliberately low. It is headroom for the pathological
+// submission, not a throughput target: an exercise scoped to a short
+// investigation window produces archives orders of magnitude smaller (a day
+// of real gnoland validator log is ~20 MB compressed), which never approach
+// this. Raise it only with -av-scan-budget and the "submission timings"
+// log lines in hand.
+const defaultMaxConcurrentSubmissions = 4
+
 func main() {
 	remote := flag.String("remote", "", "gno.land RPC endpoint to verify operator pubkeys against, e.g. https://rpc.test13.testnets.gno.land:443")
 	addr := flag.String("addr", "localhost:8080", "address to listen on")
@@ -130,6 +156,8 @@ func main() {
 	maxUploadSize := flag.Int64("max-upload-size", defaultMaxUploadSize, "maximum accepted upload size in bytes; clamd never sees more than a 1 GiB window of it at a time, so raising this is a storage/time question, not a clamd one (storage.S3Store.Save's single PutObject caps at 5 GiB)")
 	maxLogSize := flag.Int64("max-log-size", defaultMaxLogSize, "maximum accepted size in bytes of each log entry inside the archive (validator.log.gz, sentry.log.gz); each entry is streamed rather than buffered, so this bounds decompression work rather than memory")
 	avScanBudget := flag.Int64("av-scan-budget", clamav.DefaultScanBudget, "maximum decompressed bytes of log content submitted to the antivirus per submission, shared across validator.log.gz and sentry.log.gz; a submission that exceeds it is accepted and recorded as partially scanned, not rejected")
+	maxConcurrentSubmissions := flag.Int("max-concurrent-submissions", defaultMaxConcurrentSubmissions, "how many submissions may be processed at once; further uploads wait up to -submission-queue-wait for a slot, then get a 503 with Retry-After. 0 disables the limit (see portal.LimitSubmissions)")
+	submissionQueueWait := flag.Duration("submission-queue-wait", 15*time.Minute, "how long an upload waits for a processing slot before being rejected with a 503")
 	flag.Parse()
 
 	if *remote == "" {
@@ -176,25 +204,46 @@ func main() {
 	}
 
 	mux := newMux(muxDeps{
-		Verifier:        verifier,
-		Nonces:          nonces,
-		Sessions:        sessions,
-		AdminSessions:   adminSessions,
-		AdminAllowlist:  adminAllowlist,
-		Store:           store,
-		SubmissionLog:   submissionLog,
-		ExerciseStore:   exerciseStore,
-		ScoresStore:     scoresStore,
-		AVScanner:       avScanner,
-		AVScanBudget:    *avScanBudget,
-		MaxUploadSize:   *maxUploadSize,
-		ArchiveOptions:  submission.Options{MaxLogSize: *maxLogSize},
-		ProgressTracker: progressTracker,
-		StaticFS:        staticFS,
+		Verifier:                 verifier,
+		Nonces:                   nonces,
+		Sessions:                 sessions,
+		AdminSessions:            adminSessions,
+		AdminAllowlist:           adminAllowlist,
+		Store:                    store,
+		SubmissionLog:            submissionLog,
+		ExerciseStore:            exerciseStore,
+		ScoresStore:              scoresStore,
+		AVScanner:                avScanner,
+		AVScanBudget:             *avScanBudget,
+		MaxUploadSize:            *maxUploadSize,
+		ArchiveOptions:           submission.Options{MaxLogSize: *maxLogSize},
+		ProgressTracker:          progressTracker,
+		MaxConcurrentSubmissions: *maxConcurrentSubmissions,
+		SubmissionQueueWait:      *submissionQueueWait,
+		StaticFS:                 staticFS,
 	})
 
+	// ReadTimeout and WriteTimeout are deliberately left at zero. A
+	// submission is one long request — the archive is uploaded, then
+	// validated, then scanned by clamd, all before the response is written
+	// — so any finite value here cuts a validator off mid-submission for
+	// work that is proceeding normally. README.md's "Production deployment"
+	// asks the same of whatever proxy sits in front, for the same reason.
+	//
+	// ReadHeaderTimeout and IdleTimeout have nothing to do with that: they
+	// bound a connection that is sending no request at all, and an
+	// unbounded one of those is just a socket held open for free.
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 20 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	log.Printf("listening on %s, verifying operator pubkeys against %s", *addr, *remote)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	log.Printf("at most %d submissions are processed at once, each waiting up to %s for a slot",
+		*maxConcurrentSubmissions, *submissionQueueWait)
+	log.Fatal(srv.ListenAndServe())
 }
 
 // muxDeps groups every dependency newMux needs to wire the portal's
@@ -216,7 +265,14 @@ type muxDeps struct {
 	MaxUploadSize   int64
 	ArchiveOptions  submission.Options
 	ProgressTracker *portal.ProgressTracker
-	StaticFS        fs.FS
+
+	// MaxConcurrentSubmissions and SubmissionQueueWait bound how many
+	// uploads /submit processes at once; zero disables the limit. See
+	// portal.LimitSubmissions.
+	MaxConcurrentSubmissions int
+	SubmissionQueueWait      time.Duration
+
+	StaticFS fs.FS
 }
 
 // newMux builds the portal's routing table.
@@ -232,6 +288,12 @@ type muxDeps struct {
 //   - GET /admin is deliberately unauthenticated — it serves the admin
 //     sign-in page, which a browser cannot request with an
 //     Authorization header. Every /admin/* data route stays gated.
+//   - The concurrency limit wraps /submit and *only* /submit.
+//     /submit/progress is a separate pattern and must stay outside it:
+//     the page polls it every two seconds for the whole submission, so
+//     putting it behind the same semaphore would have progress requests
+//     competing for the slots the submissions themselves need — and would
+//     blind exactly the validators who are waiting.
 func newMux(d muxDeps) *http.ServeMux {
 	assets := newStaticAssets(d.StaticFS)
 
@@ -239,7 +301,7 @@ func newMux(d muxDeps) *http.ServeMux {
 	mux.Handle("/auth/challenge", auth.ChallengeHandler(d.Nonces))
 	mux.Handle("/auth/verify", auth.VerifyHandler(d.Verifier, d.Sessions))
 	mux.Handle("/auth/admin/verify", auth.VerifyHandler(d.Verifier, d.AdminSessions))
-	mux.Handle("/submit", submitHandlerFor(d))
+	mux.Handle("/submit", portal.LimitSubmissions(d.MaxConcurrentSubmissions, d.SubmissionQueueWait, submitHandlerFor(d)))
 	mux.Handle("/submit/progress", portal.ProgressHandler(d.Sessions, d.ProgressTracker))
 	mux.Handle("/admin", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assets.serveFile(w, r, "admin.html")

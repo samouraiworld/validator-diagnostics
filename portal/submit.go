@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/samourai/validator-diagnostics/auth"
@@ -42,7 +43,14 @@ const (
 	// multipartMemoryThreshold is how much of the request Go buffers in
 	// memory before spilling additional parts to its own temp files —
 	// not a size limit, just a memory/disk trade-off knob.
-	multipartMemoryThreshold = 32 << 20
+	//
+	// Deliberately small. Every real submission is an archive far larger
+	// than any plausible value here, so the spill happens either way and a
+	// generous threshold buys nothing: it only pins that much heap per
+	// concurrent upload before reaching the same temp file. 1 MiB is still
+	// ample for the form's non-file parts, which is the only thing the
+	// remainder is used for.
+	multipartMemoryThreshold = 1 << 20
 )
 
 // SubmitHandler serves POST /submit: a multipart upload of the fire
@@ -99,6 +107,56 @@ type submitResponse struct {
 	Error       string `json:"error,omitempty"`
 }
 
+// phaseTimer records how long each server-side phase took and logs one
+// line per submission.
+//
+// The ProgressTracker already publishes these same transitions, but only
+// live and only to the operator's own browser: nothing survives the
+// request. So a submission that took an hour left no record of *where* the
+// hour went — scan, store, or somewhere unexpected — which is precisely
+// what an operator needs to size -av-scan-budget, the submission limit, and
+// clamd's thread pool against real traffic rather than guesses.
+//
+// It wraps the phase transition rather than sitting beside it so the two
+// cannot drift apart: there is one call site for both.
+type phaseTimer struct {
+	progress *ProgressHandle
+	current  Phase
+	since    time.Time
+	spans    []string
+}
+
+func newPhaseTimer(progress *ProgressHandle) *phaseTimer {
+	return &phaseTimer{progress: progress}
+}
+
+// phase closes the span in progress and opens one for p.
+func (t *phaseTimer) phase(p Phase, total int64) {
+	t.closeSpan()
+	t.current, t.since = p, time.Now()
+	t.progress.Phase(p, total)
+}
+
+func (t *phaseTimer) closeSpan() {
+	if t.current == "" {
+		return
+	}
+	t.spans = append(t.spans, fmt.Sprintf("%s=%s", t.current, time.Since(t.since).Round(time.Millisecond)))
+	t.current = ""
+}
+
+// log emits the collected spans. Meant to be deferred, so it covers a
+// submission that ended early just as well as one that ran to completion —
+// a rejected scan still reports how long the scanning phase ran before it
+// failed, which is the case most worth measuring.
+func (t *phaseTimer) log(filename string) {
+	t.closeSpan()
+	if len(t.spans) == 0 {
+		return
+	}
+	log.Printf("submission timings for %s: %s", filename, strings.Join(t.spans, " "))
+}
+
 // ServeHTTP validates the session, the archive's filename/structure/
 // metadata, cross-checks the archive's declared identity against the
 // authenticated operator address, and — only if every check passes —
@@ -146,6 +204,9 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	timer := newPhaseTimer(progress)
+	defer timer.log(header.Filename)
+
 	moniker, submittedAt, err := submission.ValidateFilename(header.Filename)
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: err.Error()})
@@ -156,7 +217,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// in memory or spilled it to a temp file above — so ValidateArchive,
 	// the AV scan, and Store.Save can each take their own full pass
 	// over it without us buffering a second copy ourselves.
-	progress.Phase(PhaseValidating, 0)
+	timer.phase(PhaseValidating, 0)
 	archiveResult, err := submission.ValidateArchive(r.Context(), file, h.ArchiveOptions)
 	if err != nil {
 		writeSubmitResult(w, http.StatusBadRequest, submitResponse{Error: err.Error()})
@@ -190,7 +251,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var scanCoverage *clamav.Coverage
 
 	if h.AVScanner != nil {
-		progress.Phase(PhaseScanning, 0)
+		timer.phase(PhaseScanning, 0)
 		// Always wrapped: Add on a nil handle is a no-op, so this needs no
 		// guard for a handler built without a tracker.
 		scanner := countingScanner{inner: h.AVScanner, add: progress.Add}
@@ -247,7 +308,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// countingSeeker, which forwards Seek, not the plain countingReader
 	// the antivirus path above uses for its genuinely non-seekable gzip
 	// stream.
-	progress.Phase(PhaseStoring, header.Size)
+	timer.phase(PhaseStoring, header.Size)
 	if err := h.Store.Save(r.Context(), header.Filename, &countingSeeker{r: file, add: progress.Add}, header.Size); err != nil {
 		writeSubmitResult(w, http.StatusInternalServerError, submitResponse{Error: "unable to store archive"})
 		return
@@ -262,7 +323,7 @@ func (h *SubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	recordedAt := time.Now().UTC()
 
 	if h.Exercise != nil {
-		progress.Phase(PhaseScoring, 0)
+		timer.phase(PhaseScoring, 0)
 		cfg, err := h.Exercise.Get()
 		if err != nil {
 			log.Printf("scoring: unable to read exercise config for %s: %v", header.Filename, err)

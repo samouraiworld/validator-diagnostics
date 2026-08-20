@@ -115,6 +115,8 @@ validator for a submission that actually succeeded.
 | `-max-upload-size` | no | Maximum accepted upload, in bytes (default 4294967296 — 4 GiB. Not a scan limit: clamd never sees more than one 1 GiB window at a time). Raising it is a disk/S3/time question — see [Upload size and ClamAV](#upload-size-and-clamav) |
 | `-max-log-size` | no | Maximum accepted size of each log entry inside the archive (`validator.log.gz`, `sentry.log.gz`), in bytes (default 4294967296 — 4 GiB). Each entry is streamed, not buffered, so this bounds decompression work rather than memory |
 | `-av-scan-budget` | no | Maximum decompressed bytes of log content the antivirus examines per submission, shared across `validator.log.gz` and `sentry.log.gz` under one budget (default 34359738368 — 32 GiB). Exceeding it records partial scan coverage rather than rejecting the submission — see [Upload size and ClamAV](#upload-size-and-clamav) |
+| `-max-concurrent-submissions` | no | How many submissions are processed at once (default 4). Further uploads wait for a slot, then get a 503 with `Retry-After`. Keep it at or below `clamd.conf`'s `MaxThreads` — see [Concurrency and throughput](#concurrency-and-throughput). 0 disables the limit |
+| `-submission-queue-wait` | no | How long an upload waits for a processing slot before being rejected (default `15m`) |
 
 | Environment variable | Required | Description |
 |-----------------------|----------|-------------|
@@ -232,6 +234,59 @@ With `-clamav-addr` unset, none of this runs: no scanner means no
 all** on that row — not a reassuring one, none. Scanning is opt-in per
 deployment, but a deployment that opts out gets silence, not a false
 "clean".
+
+### Concurrency and throughput
+
+A submission is expensive and, more importantly, expensive for a *long
+time*. The upload spills to a temp file that is held for the whole
+request; the archive is then walked three separate times
+(`ValidateArchive`, the antivirus pass, the scoring pass), each
+decompressing the outer gzip again because a gzip stream cannot be
+seeked; and clamd spools every INSTREAM window to its own disk before
+scanning it. A 2.4 GB archive whose log decompresses to tens of GB
+therefore moves on the order of 60 GB through the disk, and measured
+about **an hour end to end** on an 8-core host with its Docker volumes on
+RAID5 — with the network transfer *not* the slow part.
+
+Two settings bound that, and they have to be read together:
+
+- `-max-concurrent-submissions` (default 4) caps how many run at once.
+  Beyond it, uploads wait up to `-submission-queue-wait` and are then
+  rejected with a 503 and a `Retry-After`, rather than queueing
+  invisibly — a validator stalled behind a full queue sees even the
+  browser's own upload bar freeze, with nothing to explain it.
+- `clamd.conf`'s `MaxThreads` (6 here) caps concurrent scans.
+
+**Keep `-max-concurrent-submissions` at or below `MaxThreads`.** Above
+it, scan windows queue *inside* clamd, where the wait is invisible to the
+portal and still counts against `-clamav-timeout` — which covers the dial.
+A window that times out is a failed scan, and a failed scan rejects the
+submission with a 503. Mis-size the pair and congestion stops producing
+slow submissions and starts producing lost ones, after an hour of work
+each.
+
+Parallelism does not buy much here anyway: the work is disk- and
+CPU-bound on a single box, so running more of it at once mostly stretches
+each one. The limit protects throughput rather than capping it.
+
+**Scope the exercise instead.** By far the largest lever is not a
+setting: it is how much log the exercise asks for. Real gnoland validator
+log runs about **20 MB compressed per 24 hours** (305 MB decompressed),
+so an investigation window of a few hours yields archives in the
+single-digit MB — three orders of magnitude below the case above, fast
+enough that none of these limits are ever reached. If you do scope the
+exercise that way, consider lowering `-max-upload-size` to match: a
+validator who submits their entire log by mistake is then rejected in
+seconds by `http.MaxBytesReader`, instead of consuming a processing slot
+for an hour before anyone finds out.
+
+Each submission logs a `submission timings for <file>: validating=…
+scanning=… storing=… scoring=…` line. That is the measurement to size all
+of the above against — including a submission that was *rejected*, whose
+line reports how long the failing phase ran before it gave up. To
+attribute a slow scanning phase between clamd and the disk, uncomment
+`LogClean yes` in `clamd.conf` for the duration of a test: with `LogTime
+yes` it gives the wall-clock cost of every window from the daemon itself.
 
 ### Admin endpoints
 
