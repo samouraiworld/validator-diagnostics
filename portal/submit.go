@@ -43,7 +43,14 @@ const (
 	// multipartMemoryThreshold is how much of the request Go buffers in
 	// memory before spilling additional parts to its own temp files —
 	// not a size limit, just a memory/disk trade-off knob.
-	multipartMemoryThreshold = 32 << 20
+	//
+	// Deliberately small. Every real submission is an archive far larger
+	// than any plausible value here, so the spill happens either way and a
+	// generous threshold buys nothing: it only pins that much heap per
+	// concurrent upload before reaching the same temp file. 1 MiB is still
+	// ample for the form's non-file parts, which is the only thing the
+	// remainder is used for.
+	multipartMemoryThreshold = 1 << 20
 )
 
 // SubmitHandler serves POST /submit: a multipart upload of the fire
