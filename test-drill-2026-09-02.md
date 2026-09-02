@@ -66,7 +66,12 @@ Archive structure:
 - metadata.json — validator and environment metadata; schema and example below. Unknown fields are rejected.
 - Only these files at the top level of the archive — no subfolders, no symlinks, no extra files.
 - validator_address must match your operator address; moniker must match the archive's filename.
-- Size limits: validator.log.gz and sentry.log.gz ≤ 4 GiB each, metadata.json ≤ 64 KiB, total upload ≤ 4 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.
+- Size limits: validator.log.gz and sentry.log.gz ≤ 4 GiB each, metadata.json ≤ 64 KiB, total upload < 4 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.
+
+Important:
+- Include logs covering only the requested 2-hour investigation window. Do not submit your complete node log history.
+- Set gnoland_version exactly to "chain/pearl" (case-sensitive).
+- If the portal reports that too many submissions are being processed, wait a few minutes and submit the same archive again.
 
 Please prepare the full archive (logs collected, metadata.json written and checked against the schema below) BEFORE starting authentication on the portal. Authenticate only once everything is ready to upload.
 
