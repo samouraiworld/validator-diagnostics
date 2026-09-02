@@ -33,28 +33,56 @@ Things to double-check before submitting:
 
 ## 2. Discord message — Phase 1 (announcement)
 
-Compact version, ready to paste as one Discord message:
+Ready to paste as two consecutive Discord messages:
+
+### Message 1/2 — Announcement and upload instructions
 
 ~~~text
 🚨 **VALIDATOR FIRE DRILL**
 
-Please submit a diagnostic package for the requested investigation window.
+This is a scheduled validator fire drill designed to evaluate incident-response readiness.
 
-🕒 **Logs:** 2026-09-01 12:00–14:00 UTC (2 hours only)
-⏳ **Deadline:** 2026-09-03 16:00 UTC
-🌐 **Portal:** https://gno.report
+Please submit the requested diagnostic package.
 
-**Archive**
-`<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz`
-├── `validator.log.gz`
-├── `sentry.log.gz` *(optional)*
-└── `metadata.json`
+**Investigation window (UTC):**
+2026-09-01 12:00
+↓
+2026-09-01 14:00
 
-Include only the requested 2-hour log window — **do not send your complete log history**. Files must be at the archive root: no folders, links or extra files. Prepare the archive before authenticating.
+**Submission deadline (UTC):**
+2026-09-03 16:00
 
-`validator_address` must match the authenticated operator; `moniker` must match the filename. Use `gnoland_version: "chain/pearl"` exactly (case-sensitive). A sentry log is expected when `sentry_enabled` is `true`.
+**Archive structure:**
+```text
+<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz
+├── validator.log.gz
+├── sentry.log.gz (optional)
+└── metadata.json
+```
 
-**metadata.json** *(unknown fields are rejected)*
+- `validator.log.gz` — node logs covering the requested investigation window; must be a valid gzip file.
+- `sentry.log.gz` — optional sentry logs for the same window; must be valid gzip if included. It is expected when `sentry_enabled` is `true` and is worth 4 of the 25 log-quality points.
+- `metadata.json` — validator and environment metadata; use the format in the next message. Unknown fields are rejected.
+- Keep all files at the archive root: no subfolders, symlinks or extra files.
+- `validator_address` must match the authenticated operator address; `moniker` must match the archive filename.
+- Limits: each log ≤ 4 GiB; `metadata.json` ≤ 64 KiB; total upload < 4 GiB.
+
+**Important:**
+- Include only the requested 2-hour log window. Do not submit your complete node log history.
+- Set `gnoland_version` exactly to `chain/pearl` (case-sensitive).
+- Prepare and verify the archive before starting authentication.
+- If the portal is busy, wait a few minutes and submit the same archive again.
+
+🌐 **Upload portal:** https://gno.report
+~~~
+
+### Message 2/2 — `metadata.json`
+
+~~~text
+📋 **METADATA FORMAT**
+
+Use this structure for `metadata.json`:
+
 ```json
 {
   "validator_address": "g1...",
@@ -71,9 +99,14 @@ Include only the requested 2-hour log window — **do not send your complete log
   "recent_operations": "None"
 }
 ```
-Allowed: `architecture` = `amd64`, `arm64`, `x86`; `deployment_method` = `docker`, `systemd`, `binary`, `kubernetes`.
 
-Limits: each log ≤ 4 GiB; `metadata.json` ≤ 64 KiB; total upload < 4 GiB. If the portal is busy, wait a few minutes and submit the same archive again.
+**Allowed values:**
+- `architecture`: `amd64`, `arm64`, `x86`
+- `deployment_method`: `docker`, `systemd`, `binary`, `kubernetes`
+- `sentry_enabled`: `true`, `false`
+- `backup_node`: `true`, `false`
+
+Replace the example values with your own information. Do not add unknown fields.
 ~~~
 
 ## 3. After the deadline (tomorrow 16:00 UTC)
