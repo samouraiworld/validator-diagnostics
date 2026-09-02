@@ -54,17 +54,27 @@ Submission deadline (UTC):
 
 2026-09-03 16:00
 
-Required artifacts:
+Archive structure:
 
-- validator.log.gz
-- sentry.log.gz (optional, if you run a sentry node)
-- metadata.json
+<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz
+├── validator.log.gz
+├── sentry.log.gz (optional)
+└── metadata.json
+
+- validator.log.gz — the node logs covering the requested investigation window (must be a valid gzip file).
+- sentry.log.gz — optional; your sentry node's logs for the same window (must be a valid gzip file if included). Expected when sentry_enabled is true in metadata.json, and submitting one that covers the investigation window is worth 4 of the log-quality score's 25 points.
+- metadata.json — validator and environment metadata; schema and example below. Unknown fields are rejected.
+- Only these files at the top level of the archive — no subfolders, no symlinks, no extra files.
+- validator_address must match your operator address; moniker must match the archive's filename.
+- Size limits: validator.log.gz and sentry.log.gz ≤ 4 GiB each, metadata.json ≤ 64 KiB, total upload ≤ 4 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.
+
+Please prepare the full archive (logs collected, metadata.json written and checked against the schema below) BEFORE starting authentication on the portal. Authenticate only once everything is ready to upload.
 
 Upload portal:
 
 https://gno.report
 
-metadata.json format:
+Example metadata.json:
 
 {
   "validator_address": "...",
@@ -86,8 +96,11 @@ metadata.json format:
   "recent_operations": "None"
 }
 
-architecture: amd64, arm64, or x86
-deployment_method: docker, systemd, binary, or kubernetes
+Field / Allowed values:
+- architecture: amd64, arm64, x86
+- deployment_method: docker, systemd, binary, kubernetes
+- sentry_enabled: true, false
+- backup_node: true, false
 ```
 
 ## 3. After the deadline (tomorrow 16:00 UTC)
