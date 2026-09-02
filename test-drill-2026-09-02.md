@@ -33,80 +33,48 @@ Things to double-check before submitting:
 
 ## 2. Discord message — Phase 1 (announcement)
 
-Template from `prd.md`, values filled in, updated to the current archive
-format (`validator.log.gz` + optional `sentry.log.gz`, per
-`submission/archive.go`) and with the `metadata.json` format spelled out:
+Compact version, ready to paste as one Discord message:
 
-```text
-🚨 VALIDATOR FIRE DRILL
+~~~text
+🚨 **VALIDATOR FIRE DRILL**
 
-This is a scheduled validator fire drill designed to evaluate incident-response readiness.
+Please submit a diagnostic package for the requested investigation window.
 
-Please submit the requested diagnostic package.
+🕒 **Logs:** 2026-09-01 12:00–14:00 UTC (2 hours only)
+⏳ **Deadline:** 2026-09-03 16:00 UTC
+🌐 **Portal:** https://gno.report
 
-Investigation window (UTC):
+**Archive**
+`<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz`
+├── `validator.log.gz`
+├── `sentry.log.gz` *(optional)*
+└── `metadata.json`
 
-2026-09-01 12:00
-↓
-2026-09-01 14:00
+Include only the requested 2-hour log window — **do not send your complete log history**. Files must be at the archive root: no folders, links or extra files. Prepare the archive before authenticating.
 
-Submission deadline (UTC):
+`validator_address` must match the authenticated operator; `moniker` must match the filename. Use `gnoland_version: "chain/pearl"` exactly (case-sensitive). A sentry log is expected when `sentry_enabled` is `true`.
 
-2026-09-03 16:00
-
-Archive structure:
-
-<moniker>-<YYYYMMDD-HHMMUTC>.tar.gz
-├── validator.log.gz
-├── sentry.log.gz (optional)
-└── metadata.json
-
-- validator.log.gz — the node logs covering the requested investigation window (must be a valid gzip file).
-- sentry.log.gz — optional; your sentry node's logs for the same window (must be a valid gzip file if included). Expected when sentry_enabled is true in metadata.json, and submitting one that covers the investigation window is worth 4 of the log-quality score's 25 points.
-- metadata.json — validator and environment metadata; schema and example below. Unknown fields are rejected.
-- Only these files at the top level of the archive — no subfolders, no symlinks, no extra files.
-- validator_address must match your operator address; moniker must match the archive's filename.
-- Size limits: validator.log.gz and sentry.log.gz ≤ 4 GiB each, metadata.json ≤ 64 KiB, total upload < 4 GiB. These are the deployment defaults — your organizer may have configured different values, and the error message tells you the real limit if you exceed it.
-
-Important:
-- Include logs covering only the requested 2-hour investigation window. Do not submit your complete node log history.
-- Set gnoland_version exactly to "chain/pearl" (case-sensitive).
-- If the portal reports that too many submissions are being processed, wait a few minutes and submit the same archive again.
-
-Please prepare the full archive (logs collected, metadata.json written and checked against the schema below) BEFORE starting authentication on the portal. Authenticate only once everything is ready to upload.
-
-Upload portal:
-
-https://gno.report
-
-Example metadata.json:
-
+**metadata.json** *(unknown fields are rejected)*
+```json
 {
-  "validator_address": "...",
+  "validator_address": "g1...",
   "moniker": "...",
-
-  "chain_id": "...",
-  "gnoland_version": "...",
+  "chain_id": "pearl-1",
+  "gnoland_version": "chain/pearl",
   "genesis_sha256": "...",
-
   "operating_system": "Debian 12",
   "architecture": "amd64",
-
   "sentry_enabled": true,
   "backup_node": true,
-
   "hosting_provider": "Scaleway",
   "deployment_method": "docker",
-
   "recent_operations": "None"
 }
-
-Field / Allowed values:
-- architecture: amd64, arm64, x86
-- deployment_method: docker, systemd, binary, kubernetes
-- sentry_enabled: true, false
-- backup_node: true, false
 ```
+Allowed: `architecture` = `amd64`, `arm64`, `x86`; `deployment_method` = `docker`, `systemd`, `binary`, `kubernetes`.
+
+Limits: each log ≤ 4 GiB; `metadata.json` ≤ 64 KiB; total upload < 4 GiB. If the portal is busy, wait a few minutes and submit the same archive again.
+~~~
 
 ## 3. After the deadline (tomorrow 16:00 UTC)
 
