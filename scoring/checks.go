@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,19 +29,71 @@ import (
 // unverified (see LogWindowCheck.Truncated). Nothing is retained as it
 // scans, so the cost of a large budget is decompression time, not
 // memory.
-const maxLogWindowBytes = 1 << 30 // 1 GiB of plaintext
+//
+// It was 1 GiB until the 2026-09-02 drill, where two submissions
+// decompressed past it — one to 1.39 GB, one to 2.27 GB — and one of
+// those was the only submission in the field that covered the window
+// end to end. "A plausible validator log" for a busy node over a
+// two-hour window is larger than that first guess, so this now matches
+// cmd/portal's own per-entry ceiling: the scan is willing to read
+// whatever the upload was accepted with.
+const maxLogWindowBytes = 4 << 30 // 4 GiB of plaintext
 
 // maxLogLineBytes caps a single buffered line. A line longer than this
 // ends the scan (bufio.ErrTooLong), which counts as truncation for the
 // same reason the byte budget does.
 const maxLogLineBytes = 1 << 20
 
-// timestampLayouts are tried, in order, against the first
-// whitespace-delimited token of each log line.
+// timestampLayouts are tried, in order, against a candidate timestamp
+// lifted out of a log line. The two "-0700" spellings are not
+// redundant with RFC3339: that layout demands a colon in the zone
+// offset, and both "journalctl -o short-iso" and gnoland's own console
+// encoder render it without one ("+0200").
 var timestampLayouts = []string{
 	time.RFC3339Nano,
 	time.RFC3339,
+	"2006-01-02T15:04:05.999999999-0700",
+	"2006-01-02T15:04:05-0700",
 }
+
+// timestampRe locates an ISO 8601 date-time carrying an explicit zone
+// anywhere in a log line, which is what makes a line collected through
+// journald readable. "journalctl -o short" — the default, and what most
+// submissions to the 2026-09-02 drill used — prefixes every line with a
+// syslog stamp ("Sep  1 12:00:00 host gnoland[188026]: ") that has
+// neither a year nor a zone, and journald escapes the tab after
+// gnoland's own timestamp as a literal "#011", so the real timestamp is
+// neither the first field nor whitespace-delimited.
+//
+// An explicit zone is required rather than assumed: submissions arrive
+// from hosts running at every offset, and reading a naive local time as
+// UTC would shift a perfectly good log by hours — a worse failure than
+// not recognizing it, because it is silent.
+var timestampRe = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})`)
+
+// timestampSearchBytes bounds how far into a line timestampRe looks. Every
+// collector prefix observed in practice (syslog, docker-compose, kubectl)
+// costs a few dozen bytes, so this is generous; the point is that a line
+// may be up to maxLogLineBytes long and scanning all of it, on every line
+// of a multi-gigabyte log, would cost far more than it could ever find.
+// A timestamp straddling the cutoff is missed on that line alone, which
+// changes nothing: coverage is the earliest and latest over every line.
+const timestampSearchBytes = 256
+
+// windowGrace is how far outside the configured investigation window a
+// log's first and last timestamps may fall and still count as covering
+// it.
+//
+// Without it the check is exact to the nanosecond, which no validator
+// can satisfy: `journalctl --since <start> --until <end>` returns the
+// first entry at or after the start and the last one strictly before the
+// end, so the boundary instants themselves are never present. In the
+// 2026-09-02 drill that failed 22 submissions holding exactly the
+// requested window, one of them by 293 microseconds. A minute is far
+// below the resolution the criterion is actually asking about — whether
+// the validator captured the right two hours — while still failing a log
+// that genuinely starts late.
+const windowGrace = time.Minute
 
 // MetadataChecks runs prd.md's Phase 3 metadata checks for one
 // submission: genesis hash and supported gnoland version.
@@ -125,10 +178,11 @@ func scanLogWindow(logGz io.Reader, cfg exercise.Config, budget int64) LogWindow
 	// bufio.ErrTooLong with budget to spare, and treating that as a
 	// complete scan would let our own buffer limit be reported as the
 	// validator's logs falling short of the window.
+	scanned := budget - bounded.N
 	truncated := scanner.Err() != nil || scanHitCap(bounded, gz)
 
 	if !detected {
-		return LogWindowCheck{Truncated: truncated}
+		return LogWindowCheck{Truncated: truncated, ScannedBytes: scanned}
 	}
 
 	// Coverage means verified coverage, on both sides. A truncated scan
@@ -136,8 +190,9 @@ func scanLogWindow(logGz io.Reader, cfg exercise.Config, budget int64) LogWindow
 	// side — it yields partial credit via LogQualityScore and an
 	// explicitly informational note in the generated summary, rather than
 	// either full marks it didn't earn or a warning it didn't deserve.
-	covered := !first.After(cfg.InvestigationWindowStart) && !last.Before(cfg.InvestigationWindowEnd)
-	return LogWindowCheck{Detected: true, Covered: covered, Truncated: truncated, FirstSeen: first, LastSeen: last}
+	covered := !first.After(cfg.InvestigationWindowStart.Add(windowGrace)) &&
+		!last.Before(cfg.InvestigationWindowEnd.Add(-windowGrace))
+	return LogWindowCheck{Detected: true, Covered: covered, Truncated: truncated, FirstSeen: first, LastSeen: last, ScannedBytes: scanned}
 }
 
 // scanHitCap reports whether bounded ran out of budget with data still
@@ -153,26 +208,87 @@ func scanHitCap(bounded *io.LimitedReader, gz io.Reader) bool {
 	return n > 0
 }
 
-// parseLeadingTimestamp tries each of timestampLayouts against the
-// first whitespace-delimited token of line — splitting on whitespace
-// first (rather than taking a fixed-length prefix) is what lets this
-// correctly handle layouts like RFC3339 whose rendered width varies
-// (e.g. "Z" vs "+02:00"). Falls back to parseJSONTimestamp for
-// gnoland's actual logger output, which is a JSON object rather than a
-// leading plain-text timestamp.
+// parseLeadingTimestamp recovers the instant a log line describes, in
+// three passes, cheapest first.
+//
+// The first tries timestampLayouts against the first whitespace-delimited
+// token — splitting on whitespace first (rather than taking a
+// fixed-length prefix) is what lets this correctly handle layouts whose
+// rendered width varies (e.g. "Z" vs "+02:00"). That covers a raw
+// gnoland log and anything collected with "journalctl -o short-iso*", and
+// costs no allocation.
+//
+// The second searches the head of the line for an embedded timestamp,
+// which is where journald's default output and every other collector
+// prefix leaves it. It only runs when the first pass found nothing, so
+// logs in the common shapes never pay for it.
+//
+// The third is parseJSONTimestamp, for gnoland's structured output, which
+// is a JSON object with no plain-text timestamp at all.
 func parseLeadingTimestamp(line string) (time.Time, bool) {
 	field := line
 	if i := strings.IndexAny(line, " \t"); i >= 0 {
 		field = line[:i]
 	}
 	if len(field) > 0 && len(field) <= 64 {
-		for _, layout := range timestampLayouts {
-			if ts, err := time.Parse(layout, field); err == nil {
+		if ts, ok := parseTimestampField(field); ok {
+			return ts, true
+		}
+	}
+
+	head := line
+	if len(head) > timestampSearchBytes {
+		head = head[:timestampSearchBytes]
+	}
+	// indexTimestamp first, timestampRe second. The regexp is the
+	// authority on what a timestamp is, but running it on every line of a
+	// journald-collected log costs about ten times what the byte scan
+	// does, and most lines that reach here hold no timestamp at all —
+	// stack-trace continuations, journald's own notices. The cheap scan
+	// rejects those outright.
+	if i := indexTimestamp(head); i >= 0 {
+		if m := timestampRe.FindString(head[i:]); m != "" {
+			if ts, ok := parseTimestampField(m); ok {
 				return ts, true
 			}
 		}
 	}
+
 	return parseJSONTimestamp(line)
+}
+
+// indexTimestamp returns the offset of the first position in s that could
+// begin an ISO 8601 date-time — four leading digits, dashes in the right
+// places, a "T" at offset 10 — or -1 if there is none.
+//
+// It is deliberately weaker than timestampRe: a false positive only costs
+// the caller a regexp run that starts earlier than it had to, and since
+// that run scans forward it still finds any real timestamp further along
+// the line. A false negative would lose the line entirely, so the checks
+// here are the ones every accepted spelling shares.
+func indexTimestamp(s string) int {
+	for off := 0; ; {
+		j := strings.IndexByte(s[off:], 'T')
+		if j < 0 {
+			return -1
+		}
+		i := off + j
+		if i >= 10 && s[i-4] >= '0' && s[i-4] <= '9' && s[i-6] == '-' && s[i-3] == '-' && s[i-10] >= '0' && s[i-10] <= '9' {
+			return i - 10
+		}
+		off = i + 1
+	}
+}
+
+// parseTimestampField tries each of timestampLayouts against one
+// already-isolated candidate.
+func parseTimestampField(field string) (time.Time, bool) {
+	for _, layout := range timestampLayouts {
+		if ts, err := time.Parse(layout, field); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // jsonLogLine is the subset of gnoland's (cometbft/tendermint-style)

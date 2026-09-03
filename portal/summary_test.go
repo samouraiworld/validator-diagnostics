@@ -496,3 +496,48 @@ func TestAdminHandlers_RejectWrongMethod(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminSummaryHandler_NamesAnEmptyValidatorLog(t *testing.T) {
+	// "No recognizable timestamps" sends a validator looking for a
+	// formatting problem. When the upload held nothing at all, say that
+	// instead — it is the difference between a log this tool could not
+	// read and a log that was never collected.
+	text := summaryText(t, scoring.Result{
+		SubmissionID:     "empty-1",
+		Scored:           true,
+		GenesisMatch:     true,
+		VersionSupported: true,
+		LogWindow:        scoring.LogWindowCheck{ScannedBytes: 0},
+		UploadTimeScore:  20,
+		MetadataScore:    25,
+		LogQualityScore:  13,
+	})
+
+	if !strings.Contains(text, "validator.log.gz is empty") {
+		t.Errorf("summary missing the empty-log note; got:\n%s", text)
+	}
+	if strings.Contains(text, "no recognizable timestamps") {
+		t.Errorf("summary reports an empty log as unreadable; got:\n%s", text)
+	}
+}
+
+func TestAdminSummaryHandler_UnparseableValidatorLogKeepsTheFormatWarning(t *testing.T) {
+	// The counterpart: content was read, nothing in it parsed.
+	text := summaryText(t, scoring.Result{
+		SubmissionID:     "unparseable-1",
+		Scored:           true,
+		GenesisMatch:     true,
+		VersionSupported: true,
+		LogWindow:        scoring.LogWindowCheck{ScannedBytes: 4096},
+		UploadTimeScore:  20,
+		MetadataScore:    25,
+		LogQualityScore:  13,
+	})
+
+	if !strings.Contains(text, "no recognizable timestamps found in validator.log.gz") {
+		t.Errorf("summary missing the unreadable-log warning; got:\n%s", text)
+	}
+	if strings.Contains(text, "is empty") {
+		t.Errorf("summary calls a non-empty log empty; got:\n%s", text)
+	}
+}
