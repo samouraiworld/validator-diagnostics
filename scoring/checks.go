@@ -30,14 +30,27 @@ import (
 // scans, so the cost of a large budget is decompression time, not
 // memory.
 //
-// It was 1 GiB until the 2026-09-02 drill, where two submissions
-// decompressed past it — one to 1.39 GB, one to 2.27 GB — and one of
-// those was the only submission in the field that covered the window
-// end to end. "A plausible validator log" for a busy node over a
-// two-hour window is larger than that first guess, so this now matches
-// cmd/portal's own per-entry ceiling: the scan is willing to read
-// whatever the upload was accepted with.
-const maxLogWindowBytes = 4 << 30 // 4 GiB of plaintext
+// It was 1 GiB until the 2026-09-02 drill, and 4 GiB for a few hours
+// after it. Two submissions there ran past the original budget: one
+// reached 2.27 GB, and one — the only submission in the field to cover
+// the window with margin on both sides — reached 5.69 GB, which is what
+// forced the second raise. "A plausible validator log" for a busy node
+// logging at DEBUG over two hours is well past the first guess.
+//
+// That 5.69 GB is worth spelling out, because gzip makes it easy to get
+// wrong: the ISIZE trailer that `file` reports is the uncompressed size
+// *modulo 2^32*, so this log advertises "original size modulo 2^32
+// 1394210009" and reads as a comfortable 1.39 GB. The trustworthy
+// signals are decompressing it and counting, or — as here — a scan
+// exhausting a budget the log supposedly fits inside.
+//
+// This is deliberately not pinned to cmd/portal's -max-log-size, despite
+// both being a round number of GiB. That flag bounds the *compressed*
+// validator.log.gz entry as it sits inside the tar; this bounds what the
+// entry expands to. The submission above is exactly that gap: a 279 MB
+// archive, comfortably inside a 4 GiB entry cap, holding 5.69 GB of
+// plaintext.
+const maxLogWindowBytes = 8 << 30 // 8 GiB of plaintext
 
 // maxLogLineBytes caps a single buffered line. A line longer than this
 // ends the scan (bufio.ErrTooLong), which counts as truncation for the
