@@ -5,14 +5,15 @@
 // `gnokey sign`; the server verifies the signature against the operator's
 // on-chain public key.
 //
-// This is a design skeleton: it builds and vets clean against
-// github.com/gnolang/gno (go build ./... / go vet ./...), but it has not
-// been exercised end-to-end against a real chain. It reuses primitives
-// that already exist and are tested in gnolang/gno (tm2/pkg/crypto,
-// tm2/pkg/std, tm2/pkg/sdk/bank, tm2/pkg/bft/rpc/client) rather than
-// reimplementing signing/verification logic. Before wiring this into the
-// portal: write tests, wire it to HTTP handlers, and test it end-to-end
-// against a real gnokey-signed challenge on a live node/testnet.
+// It reuses primitives that already exist and are tested in
+// gnolang/gno (tm2/pkg/crypto, tm2/pkg/std, tm2/pkg/sdk/bank,
+// tm2/pkg/bft/rpc/client) rather than reimplementing signing/verification
+// logic. The crypto round-trip and the /auth/challenge and /auth/verify
+// HTTP handlers are covered by tests in this package (challenge_test.go,
+// http_test.go); those tests stub out the on-chain pubkey lookup
+// (fetchOperatorPubKey) so they don't need a live chain. That lookup path
+// is wired into the live portal (cmd/portal/main.go) and has been
+// exercised end-to-end against a real chain in production.
 package auth
 
 import (
