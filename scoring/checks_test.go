@@ -314,3 +314,204 @@ func TestScanLogWindow_LogNotGzip(t *testing.T) {
 		t.Errorf("window = %+v, want the zero value for unparseable input", window)
 	}
 }
+
+func TestScanLogWindow_DetectsTimestampAfterSyslogPrefix(t *testing.T) {
+	// journalctl's default output ("-o short") prefixes every line with a
+	// syslog-style "Jul  8 18:00:00 host unit[pid]:" stamp, which carries
+	// no year and no zone. The timestamp worth reading is gnoland's own,
+	// further along the line — and journald escapes the tab that follows
+	// it as a literal "#011", so it is not whitespace-delimited either.
+	// Looking only at the first field finds neither.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		`Jul  8 18:00:00 SERVER1 gnoland[188026]: 2026-07-08T17:59:59.998Z#011#033[34mINFO #033[0m#011starting up`,
+		`Jul  9 18:30:00 SERVER1 gnoland[188026]: 2026-07-09T18:30:00.100Z#011#033[34mINFO #033[0m#011shutting down`,
+	)
+
+	window := ScanLogWindow(logGz, cfg)
+	if !window.Detected {
+		t.Fatalf("window = %+v, want Detected", window)
+	}
+	if !window.Covered {
+		t.Errorf("window = %+v, want Covered", window)
+	}
+	wantFirst := time.Date(2026, 7, 8, 17, 59, 59, 998000000, time.UTC)
+	if !window.FirstSeen.Equal(wantFirst) {
+		t.Errorf("FirstSeen = %v, want %v", window.FirstSeen, wantFirst)
+	}
+}
+
+func TestScanLogWindow_DetectsNumericZoneOffset(t *testing.T) {
+	// "journalctl -o short-iso" and gnoland's own console encoder render
+	// the zone as "+0200", without the colon RFC3339 requires. Same
+	// instant, different spelling.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		"2026-07-08T19:59:59.998+0200\tINFO\tstarting up",
+		"2026-07-09T20:30:00.100+0200\tINFO\tshutting down",
+	)
+
+	window := ScanLogWindow(logGz, cfg)
+	if !window.Detected {
+		t.Fatalf("window = %+v, want Detected", window)
+	}
+	if !window.Covered {
+		t.Errorf("window = %+v, want Covered", window)
+	}
+	wantFirst := time.Date(2026, 7, 8, 17, 59, 59, 998000000, time.UTC)
+	if !window.FirstSeen.Equal(wantFirst.In(window.FirstSeen.Location())) {
+		t.Errorf("FirstSeen = %v, want %v", window.FirstSeen, wantFirst)
+	}
+}
+
+func TestScanLogWindow_ToleratesWindowEdgeJitter(t *testing.T) {
+	// A validator who runs `journalctl --since <start> --until <end>` gets
+	// the first entry at or after the start and the last one strictly
+	// before the end — never the boundary instants themselves. Judging
+	// coverage to the nanosecond fails that submission for sub-second
+	// gaps it could not have avoided, which is not what the criterion is
+	// asking about.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		"2026-07-08T18:00:00.322Z first entry journalctl returned",
+		"2026-07-09T18:29:59.999Z last entry journalctl returned",
+	)
+
+	window := ScanLogWindow(logGz, cfg)
+	if !window.Detected {
+		t.Fatalf("window = %+v, want Detected", window)
+	}
+	if !window.Covered {
+		t.Errorf("window = %+v, want Covered: both edges are inside the grace period", window)
+	}
+}
+
+func TestScanLogWindow_DoesNotExtendToleranceBeyondGrace(t *testing.T) {
+	// The grace absorbs boundary semantics, not a genuinely short log.
+	cfg := windowTestConfig()
+	logGz := gzipLines(t,
+		"2026-07-08T18:05:00Z started five minutes into the window",
+		"2026-07-09T18:30:00Z ran to the end",
+	)
+
+	window := ScanLogWindow(logGz, cfg)
+	if !window.Detected {
+		t.Fatalf("window = %+v, want Detected", window)
+	}
+	if window.Covered {
+		t.Errorf("window = %+v, want !Covered: five minutes is well past the grace period", window)
+	}
+}
+
+// TestParseLeadingTimestamp_CollectorFormats pins the line shapes that
+// actually reached the portal in the 2026-09-02 drill. Almost no
+// submission carried a raw gnoland log: validators exported through
+// journalctl, whose output format varies by flag and by locale, and each
+// variant hides the timestamp somewhere different.
+func TestParseLeadingTimestamp_CollectorFormats(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want time.Time
+	}{{
+		name: "journalctl -o short",
+		line: `Sep  1 12:00:00 SERVER1 gnoland[188026]: 2026-09-01T12:00:00.322Z#011#033[34mINFO #033[0m#011Ignoring inbound connection`,
+		want: time.Date(2026, 9, 1, 12, 0, 0, 322000000, time.UTC),
+	}, {
+		name: "journalctl -o short, zero-padded day, offset zone",
+		line: `Sep 01 14:00:00 fr.ovh.server4 gnoland[533073]: 2026-09-01T14:00:00.363+0200        WARN         ignoring dial request`,
+		want: time.Date(2026, 9, 1, 12, 0, 0, 363000000, time.UTC),
+	}, {
+		// The syslog prefix is rendered in the host's locale. Reading it
+		// would mean parsing month names in every language; the embedded
+		// gnoland timestamp is locale-independent.
+		name: "journalctl -o short, French locale",
+		line: `sept. 02 19:03:10 Nomic gnoland[3032008]: 2026-09-02T21:03:10.132+0200        INFO         Timed out`,
+		want: time.Date(2026, 9, 2, 19, 3, 10, 132000000, time.UTC),
+	}, {
+		name: "journalctl -o short-iso-precise",
+		line: `2026-09-01T12:00:00.279610+00:00 n5fe5e7 gnoland-pearl[2051606]: 2026-09-01T12:00:00.279Z#011#033[34mINFO #033[0m#011Ignoring inbound`,
+		want: time.Date(2026, 9, 1, 12, 0, 0, 279610000, time.UTC),
+	}, {
+		name: "journalctl -o short-iso",
+		line: `2026-09-03T10:00:09+0200 mail.nodesync.top gnoland[2359539]: Suppressed 3359 messages`,
+		want: time.Date(2026, 9, 3, 8, 0, 9, 0, time.UTC),
+	}, {
+		name: "gnoland console encoder, offset zone",
+		line: "2026-09-01T14:00:00.186+0200\tINFO \tStarting Peer\t{\"module\": \"p2p\"}",
+		want: time.Date(2026, 9, 1, 12, 0, 0, 186000000, time.UTC),
+	}, {
+		name: "gnoland console encoder, UTC",
+		line: "2026-09-02T20:52:09.642Z\tDEBUG\taddVote\t{\"module\": \"consensus\"}",
+		want: time.Date(2026, 9, 2, 20, 52, 9, 642000000, time.UTC),
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, ok := parseLeadingTimestamp(tt.line)
+			if !ok {
+				t.Fatalf("parseLeadingTimestamp(%q) = _, false; want a timestamp", tt.line)
+			}
+			if !ts.Equal(tt.want) {
+				t.Errorf("parseLeadingTimestamp() = %v, want %v", ts.UTC(), tt.want)
+			}
+		})
+	}
+}
+
+func TestParseLeadingTimestamp_SkipsStackTraceContinuation(t *testing.T) {
+	// A panic or error dump continues across lines that carry a collector
+	// prefix but no timestamp of their own. Nothing in them is a time,
+	// and inventing one from the syslog prefix — which has no year —
+	// would drag FirstSeen back to year zero.
+	line := `sept. 02 05:16:55 Nomic gnoland[3032008]: github.com/gnolang/gno/tm2/pkg/p2p.(*MultiplexSwitch).Broadcast.func1`
+	if ts, ok := parseLeadingTimestamp(line); ok {
+		t.Errorf("parseLeadingTimestamp() = %v, true; want false", ts)
+	}
+}
+
+// BenchmarkParseLeadingTimestamp measures the two paths separately: the
+// first-field fast path, and the fallback that searches the head of the
+// line. The fallback runs on every line of a journald-collected log, and
+// those run to gigabytes decompressed, so its cost bounds how long a
+// scan takes and therefore how much of maxLogWindowBytes is usable.
+func BenchmarkParseLeadingTimestamp(b *testing.B) {
+	benchmarks := []struct {
+		name string
+		line string
+	}{
+		{"fast path", "2026-09-01T12:00:00.279610+00:00 n5fe5e7 gnoland-pearl[2051606]: Ignoring inbound connection"},
+		{"regex fallback", `Sep  1 12:00:00 SERVER1 gnoland[188026]: 2026-09-01T12:00:00.322Z#011#033[34mINFO #033[0m#011Ignoring inbound connection`},
+		{"no timestamp", `Sep  1 12:00:00 Nomic gnoland[3032008]: github.com/gnolang/gno/tm2/pkg/p2p.(*MultiplexSwitch).Broadcast.func1`},
+	}
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			for range b.N {
+				parseLeadingTimestamp(bm.line)
+			}
+		})
+	}
+}
+
+func TestScanLogWindow_SeparatesAnEmptyLogFromAnUnparseableOne(t *testing.T) {
+	// Both score zero, but they are different failures: one validator
+	// uploaded nothing, the other uploaded something this could not read.
+	// ScannedBytes is what lets the generated summary say which.
+	cfg := windowTestConfig()
+
+	empty := ScanLogWindow(gzipLines(t), cfg)
+	if empty.Detected {
+		t.Errorf("empty = %+v, want !Detected", empty)
+	}
+	if empty.ScannedBytes != 0 {
+		t.Errorf("empty.ScannedBytes = %d, want 0", empty.ScannedBytes)
+	}
+
+	unparseable := ScanLogWindow(gzipLines(t, "no timestamp here", "nor here either"), cfg)
+	if unparseable.Detected {
+		t.Errorf("unparseable = %+v, want !Detected", unparseable)
+	}
+	if unparseable.ScannedBytes == 0 {
+		t.Error("unparseable.ScannedBytes = 0, want the bytes it read: the log had content, it just held no timestamp")
+	}
+}

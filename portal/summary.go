@@ -74,6 +74,8 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 			// scan stopping early is a limit of this tool, not something
 			// the validator did wrong.
 			switch {
+			case !result.LogWindow.Detected && result.LogWindow.ScannedBytes == 0:
+				b.WriteString("  - ⚠️ validator.log.gz is empty\n")
 			case !result.LogWindow.Detected:
 				b.WriteString("  - ⚠️ no recognizable timestamps found in validator.log.gz\n")
 			case result.LogWindow.Truncated:
@@ -91,6 +93,8 @@ func AdminSummaryHandler(log *FileLog, exerciseStore *exercise.FileStore, scores
 				if e.SentryEnabled {
 					b.WriteString("  - ℹ️ no sentry.log.gz submitted (sentry_enabled is true)\n")
 				}
+			case !result.SentryLogWindow.Detected && result.SentryLogWindow.ScannedBytes == 0:
+				b.WriteString("  - ⚠️ sentry.log.gz is empty\n")
 			case !result.SentryLogWindow.Detected:
 				b.WriteString("  - ⚠️ no recognizable timestamps found in sentry.log.gz\n")
 			case result.SentryLogWindow.Truncated:

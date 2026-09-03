@@ -86,6 +86,19 @@ type LogWindowCheck struct {
 
 	FirstSeen time.Time `json:"first_seen,omitempty"`
 	LastSeen  time.Time `json:"last_seen,omitempty"`
+
+	// ScannedBytes is how much decompressed content the scan actually
+	// read. It exists to separate the two ways a log can end up
+	// undetected: an empty file, and a file full of lines nothing could
+	// parse. Both score the same, but only the second is worth
+	// investigating, and telling a validator "no recognizable timestamps"
+	// about an empty upload sends them looking for a formatting problem
+	// they do not have.
+	//
+	// Records written before this field existed decode it as 0, which
+	// reads as "empty". That is only correct after a rescore has rewritten
+	// them (see cmd/rescore); until then, treat a 0 here as unknown.
+	ScannedBytes int64 `json:"scanned_bytes,omitempty"`
 }
 
 // LogQualityScore combines the fixed base credit for passing archive
